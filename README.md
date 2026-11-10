@@ -281,6 +281,9 @@ pio run -t upload
 - `wave`: 指定した角度へ面状の波が流れる
 - `pulse`: 全ノードが同期して明滅する
 - `rainbow`: 色相がノード間を流れる
+- `twinkle`: ノードごとに異なるタイミングで明滅する
+- `alternate`: アドレスの偶数・奇数の2組が交互に明滅する
+- `solid`: 選んだ色ですべてのノードを点灯する
 
 `EffectService` が効果を毎フレーム展開し、既存の `LED_SET_NOW` を各バルーンへ送ります。ファームウェアに新しいオペコードは不要です。ブラウザ側のプレビューは `Views/lib/effect-model.svelte.ts`、実機配信は `Services/EffectService.cs` が同じ式で計算します。
 

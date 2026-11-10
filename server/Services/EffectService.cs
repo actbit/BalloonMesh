@@ -364,6 +364,18 @@ public sealed class EffectService : BackgroundService
                 var value = 0.5 - 0.5 * Math.Cos(2 * Math.PI * elapsed / period);
                 return Blend(run, value);
             }
+            case "solid":
+                return Blend(run, 1);
+            case "twinkle":
+            case "alternate":
+            {
+                var period = run.Wavelength / run.Speed;
+                var offset = run.Kind == "twinkle"
+                    ? (balloon.MeshAddress * 37 % 97) / 97.0
+                    : (balloon.MeshAddress % 2) / 2.0;
+                var value = 0.5 + 0.5 * Math.Cos(2 * Math.PI * (elapsed / period + offset));
+                return Blend(run, value);
+            }
             case "rainbow":
             {
                 var distance = DistanceMeters(originLat, originLon, balloon.Lat!.Value, balloon.Lon!.Value);
@@ -445,8 +457,9 @@ public sealed class EffectService : BackgroundService
             "wave" or "sweep" => "wave",
             "pulse" or "breathe" => "pulse",
             "rainbow" or "hue" => "rainbow",
+            "twinkle" or "alternate" or "solid" => kind.Trim().ToLowerInvariant(),
             _ => throw new ArgumentException(
-                $"Unknown effect kind '{kind}'. Use flow, wave, pulse or rainbow.")
+                $"Unknown effect kind '{kind}'. Use flow, wave, pulse, rainbow, twinkle, alternate or solid.")
         };
 
     private static string LabelFor(string kind) => kind switch
@@ -455,6 +468,9 @@ public sealed class EffectService : BackgroundService
         "wave" => "Wave sweep",
         "pulse" => "Synchronised pulse",
         "rainbow" => "Rainbow drift",
+        "twinkle" => "Twinkle",
+        "alternate" => "Alternating",
+        "solid" => "Steady light",
         _ => kind
     };
 
@@ -465,6 +481,8 @@ public sealed class EffectService : BackgroundService
             "wave" => (45, 150, 0.35, 90),
             "pulse" => (1, 3, 1, 0),
             "rainbow" => (25, 240, 1, 0),
+        "twinkle" or "alternate" => (1, 6, 1, 0),
+        "solid" => (1, 10, 1, 0),
             _ => (45, 150, 0.35, 0)
         };
 

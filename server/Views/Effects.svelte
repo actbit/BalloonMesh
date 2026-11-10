@@ -14,7 +14,7 @@
   } from './lib/effect-model.svelte.ts';
   import { FleetMap } from './lib/fleet-map.svelte.ts';
 
-  type EffectKind = 'flow' | 'wave' | 'pulse' | 'rainbow';
+  type EffectKind = 'flow' | 'wave' | 'pulse' | 'rainbow' | 'twinkle' | 'alternate' | 'solid';
   type EffectParams = {
     kind: EffectKind;
     origin: number | null;
@@ -548,7 +548,9 @@
               <div class="colour-row">{@render colourPicker('残光色', secondaryHex, (hex) => setSecondary(hex))}</div>
             </div>
           {/if}
-          {#if params.kind === 'pulse'}
+          {#if params.kind === 'twinkle' || params.kind === 'alternate' || params.kind === 'solid'}
+            {@render rangeField(params.kind === 'solid' ? '消灯までの周期' : '明滅の周期', '秒', 5, 20, 1, params.wavelength / params.speed, (value) => (params.wavelength = value * params.speed))}
+          {:else if params.kind === 'pulse'}
             {@render rangeField('明滅の周期', '秒', 0.5, 20, 0.5, params.wavelength / Math.max(0.5, params.speed), (value) => (params.wavelength = value * Math.max(0.5, params.speed)))}
           {:else}
             {@render rangeField('速度', 'm/s', 1, 200, 1, params.speed, (value) => (params.speed = value))}

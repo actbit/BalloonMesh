@@ -5,7 +5,7 @@
 // compileModule(), which does not strip TypeScript annotations.  The .svelte.ts
 // extension is required so the build pipeline treats it as a local module.
 
-/** @typedef {'flow'|'wave'|'pulse'|'rainbow'} EffectKind */
+/** @typedef {'flow'|'wave'|'pulse'|'rainbow'|'twinkle'|'alternate'|'solid'} EffectKind */
 
 /**
  * @typedef {object} EffectParams
@@ -69,6 +69,21 @@ export const effectPresets = [
     wavelength: 240,
     width: 1,
     directionDeg: 0
+  },
+  {
+    id: 'twinkle', glyph: 'STAR', label: 'きらめき', english: 'Twinkle',
+    description: 'ノードごとに異なるタイミングで光が明滅します。',
+    speed: 1, wavelength: 6, width: 1, directionDeg: 0
+  },
+  {
+    id: 'alternate', glyph: 'ALT', label: '交互', english: 'Alternating',
+    description: 'ノードを2組に分け、交互に明るくします。',
+    speed: 1, wavelength: 6, width: 1, directionDeg: 0
+  },
+  {
+    id: 'solid', glyph: 'ON', label: '点灯', english: 'Steady',
+    description: 'すべてのノードを選んだ色で点灯します。',
+    speed: 1, wavelength: 10, width: 1, directionDeg: 0
   }
 ];
 
@@ -140,6 +155,17 @@ export function renderEffectColors(balloons, params, elapsedSeconds, origin) {
     if (params.kind === 'pulse') {
       const period = Math.max(0.2, params.wavelength / Math.max(0.5, params.speed));
       const value = 0.5 - 0.5 * Math.cos((2 * Math.PI * elapsed) / period);
+      return colorFor(balloon.meshAddress, params, value);
+    }
+    if (params.kind === 'solid') {
+      return colorFor(balloon.meshAddress, params, 1);
+    }
+    if (params.kind === 'twinkle' || params.kind === 'alternate') {
+      const period = params.wavelength / Math.max(0.5, params.speed);
+      const offset = params.kind === 'twinkle'
+        ? ((balloon.meshAddress * 37) % 97) / 97
+        : (balloon.meshAddress % 2) / 2;
+      const value = 0.5 + 0.5 * Math.cos(2 * Math.PI * (elapsed / period + offset));
       return colorFor(balloon.meshAddress, params, value);
     }
     const distance = distanceMeters(originLat, originLon, lat, lon);

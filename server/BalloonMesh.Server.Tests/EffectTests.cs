@@ -49,6 +49,9 @@ public sealed class EffectTests
     [InlineData("wave")]
     [InlineData("pulse")]
     [InlineData("rainbow")]
+    [InlineData("twinkle")]
+    [InlineData("alternate")]
+    [InlineData("solid")]
     public async Task EachCycleClearsThenResumesWithoutAStopRequest(string kind)
     {
         using var database = new TemporaryDatabase();
@@ -87,6 +90,9 @@ public sealed class EffectTests
     [InlineData("wave")]
     [InlineData("pulse")]
     [InlineData("rainbow")]
+    [InlineData("twinkle")]
+    [InlineData("alternate")]
+    [InlineData("solid")]
     public async Task ScheduledStopWaitsForCycleThenClearsAllNodes(string kind)
     {
         using var database = new TemporaryDatabase();
@@ -121,6 +127,40 @@ public sealed class EffectTests
         while (gateway.Commands.Reader.TryRead(out var command)) commands.Add(command);
         Assert.Equal(fleet.GetBalloons().Count, commands.Count);
         Assert.All(commands, command => Assert.Equal(new byte[] { 0, 0, 0 }, command.Payload[5..8]));
+    }
+
+    [Fact]
+    public async Task AddedEffectsProduceDistinctNodeColours()
+    {
+        using var database = new TemporaryDatabase();
+        var fleet = new FleetService(database.Store);
+        var events = new RecordingMonitorEvents();
+        var time = new TestTimeProvider(new DateTimeOffset(2026, 11, 8, 10, 0, 0, TimeSpan.Zero));
+        var registry = new GatewayRegistry(events);
+        var gateway = registry.GetOrRegister("test");
+        var dispatch = new LedDispatchService(registry, fleet, database.Store, events, time,
+            NullLogger<LedDispatchService>.Instance);
+        var pump = typeof(EffectService).GetMethod("PumpAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        async Task<Dictionary<ushort, byte[]>> Render(string kind)
+        {
+            var effects = new EffectService(fleet, dispatch, registry, events, time,
+                NullLogger<EffectService>.Instance);
+            await effects.StartAsync(new EffectStartRequest(kind, R: 255, G: 0, B: 0), default);
+            await (Task)pump.Invoke(effects, [CancellationToken.None])!;
+            var colours = new Dictionary<ushort, byte[]>();
+            while (gateway.Commands.Reader.TryRead(out var command)) colours[command.Dst] = command.Payload[5..8];
+            return colours;
+        }
+
+        var solid = await Render("solid");
+        Assert.Equal(new byte[] { 255, 0, 0 }, solid[0x0101]);
+        Assert.Equal(new byte[] { 255, 0, 0 }, solid[0x0102]);
+        var alternating = await Render("alternate");
+        Assert.Equal(new byte[] { 0, 0, 0 }, alternating[0x0101]);
+        Assert.Equal(new byte[] { 255, 0, 0 }, alternating[0x0102]);
+        var twinkle = await Render("twinkle");
+        Assert.NotEqual(twinkle[0x0101][0], twinkle[0x0102][0]);
     }
 
     [Fact]
