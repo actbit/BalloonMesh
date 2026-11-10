@@ -79,6 +79,13 @@ public sealed class RecordingMonitorEvents : IMonitorEvents
     public Task SimulationChangedAsync(bool running) => Task.CompletedTask;
     public Task CommandSentAsync(CommandResultDto result) => Task.CompletedTask;
     public Task OnboardingUpdatedAsync(IReadOnlyList<MockProvisioningDevice> devices) => Task.CompletedTask;
+    public Task EffectChangedAsync(EffectStateDto? effect)
+    {
+        Effects.Add(effect);
+        return Task.CompletedTask;
+    }
+
+    public List<EffectStateDto?> Effects { get; } = [];
 }
 
 public sealed class TestTimeProvider : TimeProvider

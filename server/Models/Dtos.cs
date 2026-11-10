@@ -76,7 +76,8 @@ public sealed record StateDto(
     IReadOnlyList<BalloonDto> Balloons,
     IReadOnlyList<AnchorDto> Anchors,
     IReadOnlyList<GatewayDto> Gateways,
-    IReadOnlyList<GroupDto> Groups);
+    IReadOnlyList<GroupDto> Groups,
+    EffectStateDto? Effect = null);
 
 public sealed record CommandResultDto(
     bool Accepted,
@@ -115,6 +116,50 @@ public sealed record LedResetRequest(
     byte R = 0,
     byte G = 0,
     byte B = 0);
+
+/// <summary>
+/// Abstract light effect.  The server expands this into per-balloon LED
+/// commands, so the UI never has to describe individual layers.
+/// </summary>
+public sealed record EffectStartRequest(
+    string Kind,
+    string? Origin = null,
+    double? Speed = null,
+    double? Wavelength = null,
+    double? Width = null,
+    int? DirectionDeg = null,
+    byte R = 56,
+    byte G = 189,
+    byte B = 248,
+    byte R2 = 0,
+    byte G2 = 0,
+    byte B2 = 0,
+    double? DurationSeconds = null,
+    int? FrameIntervalMs = null,
+    bool ClearOnStop = false);
+
+public sealed record EffectStopRequest(bool Clear = false);
+
+public sealed record EffectStateDto(
+    string Kind,
+    string Label,
+    bool Running,
+    string? OriginAddress,
+    string? OriginName,
+    double Speed,
+    double Wavelength,
+    double Width,
+    int DirectionDeg,
+    byte R,
+    byte G,
+    byte B,
+    byte R2,
+    byte G2,
+    byte B2,
+    int FrameIntervalMs,
+    double DurationSeconds,
+    DateTimeOffset StartedAt,
+    DateTimeOffset? EndsAt);
 
 public sealed record InitialPositionRequest(double Lat, double Lon);
 

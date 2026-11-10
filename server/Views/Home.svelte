@@ -665,6 +665,10 @@
         <p>{model.subtitle}</p>
       </div>
     </div>
+    <nav class="nav">
+      <a class="nav-item" href="/">エフェクト</a>
+      <a class="nav-item active" href="/control">詳細設定</a>
+    </nav>
     <div class="stats">
       <div class="stat"><strong>{balloons.length}</strong><span>balloons</span></div>
       <div class="stat"><strong>{onlineCount}</strong><span>online</span></div>
@@ -949,7 +953,7 @@
     backdrop-filter: blur(16px);
   }
 
-  .brand { display: flex; align-items: center; gap: 12px; min-width: 280px; }
+  .brand { display: flex; align-items: center; gap: 12px; min-width: 230px; }
   .brand-mark {
     width: 34px; height: 34px; border-radius: 50%;
     background: conic-gradient(from 210deg, #38bdf8, #a78bfa, #f472b6, #38bdf8);
@@ -957,6 +961,17 @@
   }
   .brand h1 { margin: 0; font-size: 20px; letter-spacing: 0.02em; }
   .brand p { margin: 2px 0 0; font-size: 12px; color: #94a3b8; }
+
+  .nav {
+    display: flex; gap: 4px; padding: 3px; border-radius: 999px;
+    background: rgba(15, 23, 42, 0.7); border: 1px solid rgba(148, 163, 184, 0.16);
+  }
+  .nav-item {
+    padding: 7px 14px; border-radius: 999px; font-size: 11px; font-weight: 700;
+    color: #94a3b8; text-decoration: none; letter-spacing: 0.02em;
+  }
+  .nav-item:hover { color: #e2e8f0; background: rgba(56, 189, 248, 0.08); }
+  .nav-item.active { color: #bae6fd; background: rgba(56, 189, 248, 0.16); }
 
   .stats { display: flex; gap: 18px; margin-left: auto; align-items: center; }
   .stat { display: flex; flex-direction: column; min-width: 56px; }

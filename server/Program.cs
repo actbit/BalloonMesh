@@ -31,7 +31,9 @@ builder.Services.AddSingleton<LedDispatchService>();
 builder.Services.AddSingleton<CommandService>();
 builder.Services.AddSingleton<MockProvisioningService>();
 builder.Services.AddSingleton<SimulationService>();
+builder.Services.AddSingleton<EffectService>();
 builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<SimulationService>());
+builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<EffectService>());
 builder.Services.AddHostedService<AggregationWorker>();
 builder.Services.AddHostedService<ShowRecoveryWorker>();
 builder.Services.AddHostedService<LedDispatchWorker>();
@@ -105,18 +107,39 @@ app.MapGet("/", (HttpContext context) =>
 {
     var user = AuthenticatedUser.From(context.User);
     return Svelte.View(
-        "Home",
+        "Effects",
         new HomePageModel(
             "Balloon Mesh",
             ServerInfo.Version,
-            "ESP32-C3 RGB balloon fleet — live 2D map, FTM positioning and LED scheduling",
+            "Abstract light effects — flow from a node, waves and pulses",
             user.Name,
             user.Provider,
             user.Avatar,
             user.CanOperate,
             user.CanAdmin),
         SvelteRenderMode.Client,
-        new PageMetadata("Balloon Mesh", new Dictionary<string, string>
+        new PageMetadata("Balloon Mesh — Effects", new Dictionary<string, string>
+        {
+            ["viewport"] = "width=device-width, initial-scale=1"
+        }));
+}).RequireAuthorization(AuthRoles.Viewer);
+
+app.MapGet("/control", (HttpContext context) =>
+{
+    var user = AuthenticatedUser.From(context.User);
+    return Svelte.View(
+        "Home",
+        new HomePageModel(
+            "Balloon Mesh",
+            ServerInfo.Version,
+            "Detailed control — live 2D map, FTM positioning and LED scheduling",
+            user.Name,
+            user.Provider,
+            user.Avatar,
+            user.CanOperate,
+            user.CanAdmin),
+        SvelteRenderMode.Client,
+        new PageMetadata("Balloon Mesh — Detailed control", new Dictionary<string, string>
         {
             ["viewport"] = "width=device-width, initial-scale=1"
         }));
@@ -135,8 +158,10 @@ app.MapGet("/api/health", () => Results.Ok(new
     time = DateTimeOffset.UtcNow
 })).AllowAnonymous();
 
-app.MapGet("/api/state", (FleetService fleet, GatewayRegistry gateways, SimulationService simulation) =>
-    Results.Ok(fleet.GetState(gateways.Snapshot(), simulation.Running, ServerInfo.Version)))
+app.MapGet("/api/state", (FleetService fleet, GatewayRegistry gateways,
+    SimulationService simulation, EffectService effects) =>
+    Results.Ok(fleet.GetState(gateways.Snapshot(), simulation.Running, ServerInfo.Version,
+        effects.Current)))
     .RequireAuthorization(AuthRoles.Viewer);
 
 app.MapGet("/api/balloons", (FleetService fleet) => Results.Ok(fleet.GetBalloons()))
@@ -278,6 +303,29 @@ app.MapPost("/api/commands/reset", async (LedResetRequest request, CommandServic
     {
         return Results.BadRequest(new { error = exception.Message });
     }
+}).RequireAuthorization(AuthRoles.Operator);
+
+app.MapGet("/api/effects", (EffectService effects) => Results.Ok(effects.Current))
+    .RequireAuthorization(AuthRoles.Viewer);
+
+app.MapPost("/api/effects/start", async (EffectStartRequest request, EffectService effects,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await effects.StartAsync(request, cancellationToken));
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+}).RequireAuthorization(AuthRoles.Operator);
+
+app.MapPost("/api/effects/stop", async (EffectStopRequest request, EffectService effects,
+    CancellationToken cancellationToken) =>
+{
+    var state = await effects.StopAsync(request.Clear, cancellationToken);
+    return state is null ? Results.NoContent() : Results.Ok(state);
 }).RequireAuthorization(AuthRoles.Operator);
 
 app.MapPost("/api/demo/start", async (SimulationService simulation, CancellationToken cancellationToken) =>

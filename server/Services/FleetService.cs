@@ -106,14 +106,16 @@ public sealed class FleetService
             ?? throw new InvalidOperationException($"Balloon {meshAddress:X4} was not found.");
     }
 
-    public StateDto GetState(IReadOnlyList<GatewayDto> gateways, bool simulationRunning, string version) => new(
+    public StateDto GetState(IReadOnlyList<GatewayDto> gateways, bool simulationRunning,
+        string version, EffectStateDto? effect = null) => new(
         DateTimeOffset.UtcNow,
         version,
         simulationRunning,
         GetBalloons(),
         GetAnchors(),
         gateways,
-        GetGroups());
+        GetGroups(),
+        effect);
 
     public BalloonDto SetInitialPosition(ushort meshAddress, double lat, double lon)
     {

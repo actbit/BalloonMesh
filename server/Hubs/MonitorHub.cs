@@ -9,18 +9,22 @@ public sealed class MonitorHub : Hub
     private readonly FleetService _fleet;
     private readonly GatewayRegistry _gateways;
     private readonly SimulationService _simulation;
+    private readonly EffectService _effects;
 
-    public MonitorHub(FleetService fleet, GatewayRegistry gateways, SimulationService simulation)
+    public MonitorHub(FleetService fleet, GatewayRegistry gateways, SimulationService simulation,
+        EffectService effects)
     {
         _fleet = fleet;
         _gateways = gateways;
         _simulation = simulation;
+        _effects = effects;
     }
 
     public override async Task OnConnectedAsync()
     {
         await Clients.Caller.SendAsync("state",
-            _fleet.GetState(_gateways.Snapshot(), _simulation.Running, ServerInfo.Version));
+            _fleet.GetState(_gateways.Snapshot(), _simulation.Running, ServerInfo.Version,
+                _effects.Current));
         await base.OnConnectedAsync();
     }
 }
@@ -33,6 +37,7 @@ public interface IMonitorEvents
     Task SimulationChangedAsync(bool running);
     Task CommandSentAsync(CommandResultDto result);
     Task OnboardingUpdatedAsync(IReadOnlyList<MockProvisioningDevice> devices);
+    Task EffectChangedAsync(EffectStateDto? effect);
 }
 
 public sealed class MonitorNotifier : IMonitorEvents
@@ -61,6 +66,9 @@ public sealed class MonitorNotifier : IMonitorEvents
 
     public Task OnboardingUpdatedAsync(IReadOnlyList<MockProvisioningDevice> devices) =>
         _hub.Clients.All.SendAsync("onboardingUpdated", devices);
+
+    public Task EffectChangedAsync(EffectStateDto? effect) =>
+        _hub.Clients.All.SendAsync("effectChanged", effect);
 }
 
 public static class ServerInfo

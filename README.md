@@ -22,9 +22,11 @@ server/                         ASP.NET Core
   Auth/                         Cookie + OIDC / Discord + role policies
   Protocol/                     Protocol B codec
   Data/                         PostgreSQL (Npgsql)
-  Services/                     FTM 集約 / 測位 / LED 配信 / Gateway / シミュレーション
+  Services/                     FTM 集約 / 測位 / LED 配信 / エフェクト / Gateway / シミュレーション
   Hubs/                         SignalR
-  Views/Home.svelte             SvelteSharp Client モードの UI
+  Views/Effects.svelte          既定画面: 抽象エフェクト・コンポーザー
+  Views/Home.svelte             詳細設定: 地図・LED 予約・Gateway 状態
+  Views/lib/                    effect-model / fleet-map の .svelte.ts モジュール
   Views/Login.svelte            ログイン画面
 
 third_party/SvelteSharp/        git submodule (actbit/SvelteSharp, commit pinned)
@@ -74,12 +76,13 @@ $env:ConnectionStrings__BalloonMesh = "Host=127.0.0.1;Port=5432;Database=balloon
 dotnet run --project server/BalloonMesh.Server.csproj --urls http://0.0.0.0:5080
 ```
 
-- Web UI: <http://localhost:5080/>
+- Web UI（既定）: <http://localhost:5080/> — 抽象エフェクト・コンポーザー
+- 詳細設定: <http://localhost:5080/control> — 地図・LED 予約・Gateway 状態
 - SignalR: `/hubs/monitor`
 - Gateway WebSocket: `/ws/gateway`
 - Gateway HTTP: `POST /api/gateway/{id}/events`, `GET /api/gateway/{id}/commands?waitMs=10000`
 
-デモシミュレーションは既定で有効です。UI 右上の **Demo running / Start demo** で切り替えられます。無効化する場合:
+デモシミュレーションは既定で有効です。詳細設定画面の右上 **Demo running / Start demo** で切り替えられます。無効化する場合:
 
 ```powershell
 $env:Simulation__Enabled = "false"
@@ -270,10 +273,27 @@ pio run -t upload
 - Gateway 共有トークン認証（`Gateway:Token` / `X-Gateway-Token`）
 - UI の Gateway 状態（prov/unprov、spool 件数、transport）
 
+### 抽象エフェクト
+
+既定画面（`/`）は、レイヤーやノードごとの色指定ではなく「光の動き」を選ぶコンポーザーです。
+
+- `flow`: 選んだノードを起点に、光の帯が外へ流れる
+- `wave`: 指定した角度へ面状の波が流れる
+- `pulse`: 全ノードが同期して明滅する
+- `rainbow`: 色相がノード間を流れる
+
+`EffectService` が効果を毎フレーム展開し、既存の `LED_SET_NOW` を各バルーンへ送ります。ファームウェアに新しいオペコードは不要です。ブラウザ側のプレビューは `Views/lib/effect-model.svelte.ts`、実機配信は `Services/EffectService.cs` が同じ式で計算します。
+
+- `GET /api/effects` — 現在のエフェクト状態
+- `POST /api/effects/start` — 抽象エフェクトを開始（Operator 以上）
+- `POST /api/effects/stop` — 停止（`{ "clear": true }` で消灯）
+- SignalR `effectChanged` — 開始・停止を全クライアントへ通知
+
 ### SvelteSharp Client モード
 
-- `server/Views/Home.svelte` をビルド時に Svelte 5 コンパイラでクライアント graph に変換
-- 実行時に `Svelte.View("Home", model, SvelteRenderMode.Client, ...)`
+- `server/Views/Effects.svelte`（既定）と `Home.svelte`（詳細設定）をビルド時に Svelte 5 クライアント graph に変換
+- 実行時に `Svelte.View("Effects" | "Home", model, SvelteRenderMode.Client, ...)`
+- 再利用ロジックは `Views/lib/*.svelte.ts` に分離。UI 部品は Svelte 5 snippet でコンポーネント化
 - Node.js / npm / Vite はアプリ実行時に不要（SvelteSharp のツールチェーン復元のみ初回ビルドで使用）
 - MapLibre と SignalR はブラウザで CDN から遅延ロード
 
