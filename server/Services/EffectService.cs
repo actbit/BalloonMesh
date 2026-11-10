@@ -114,24 +114,30 @@ public sealed class EffectService : BackgroundService
         return state;
     }
 
-    public async Task<EffectStateDto?> StopAsync(bool clear, CancellationToken cancellationToken)
+    public Task<EffectStateDto?> StopAsync(bool clear, CancellationToken cancellationToken) =>
+        StopAsync(clear, expectedRun: null);
+
+    private async Task<EffectStateDto?> StopAsync(bool clear, EffectRun? expectedRun)
     {
         EffectStateDto? state;
         lock (_gate)
         {
+            if (expectedRun is not null && !ReferenceEquals(_run, expectedRun))
+            {
+                return null;
+            }
             _run = null;
             state = _last is null ? null : _last with { Running = false };
             _last = state;
+            if (state is not null && clear)
+            {
+                SendBlackFrame();
+            }
         }
 
         if (state is null)
         {
             return null;
-        }
-
-        if (clear)
-        {
-            SendBlackFrame();
         }
 
         _logger.LogInformation("effect {Kind} stopped", state.Kind);
@@ -174,7 +180,7 @@ public sealed class EffectService : BackgroundService
         var now = _time.GetUtcNow();
         if (run.EndsAt is { } endsAt && now >= endsAt)
         {
-            await StopAsync(run.ClearOnStop, cancellationToken);
+            await StopAsync(run.ClearOnStop, run);
             return;
         }
 
@@ -188,9 +194,9 @@ public sealed class EffectService : BackgroundService
             {
                 return;
             }
+            run.NextFrameAt = now.AddMilliseconds(run.FrameIntervalMs);
+            RenderFrame(run, now);
         }
-        run.NextFrameAt = now.AddMilliseconds(run.FrameIntervalMs);
-        RenderFrame(run, now);
     }
 
     private void RenderFrame(EffectRun run, DateTimeOffset now)

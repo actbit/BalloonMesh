@@ -1,12 +1,42 @@
 using BalloonMesh.Server.Models;
 using BalloonMesh.Server.Services;
 using Microsoft.Extensions.Logging.Abstractions;
+using System.Reflection;
 
 namespace BalloonMesh.Server.Tests;
 
 [Collection("PostgresDatabase")]
 public sealed class EffectTests
 {
+    [Fact]
+    public async Task ExpirationOfPreviousRunDoesNotStopOrClearItsReplacement()
+    {
+        using var database = new TemporaryDatabase();
+        var fleet = new FleetService(database.Store);
+        var events = new RecordingMonitorEvents();
+        var time = new TestTimeProvider(new DateTimeOffset(2026, 11, 8, 10, 0, 0, TimeSpan.Zero));
+        var registry = new GatewayRegistry(events);
+        var gateway = registry.GetOrRegister("test");
+        var dispatch = new LedDispatchService(registry, fleet, database.Store, events, time,
+            NullLogger<LedDispatchService>.Instance);
+        var effects = new EffectService(fleet, dispatch, registry, events, time,
+            NullLogger<EffectService>.Instance);
+
+        await effects.StartAsync(new EffectStartRequest("flow", DurationSeconds: 1, ClearOnStop: true), default);
+        var oldRun = typeof(EffectService).GetField("_run", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(effects);
+        await effects.StartAsync(new EffectStartRequest("wave"), default);
+
+        var stop = typeof(EffectService).GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(method => method.Name == "StopAsync");
+        var result = await (Task<EffectStateDto?>)stop.Invoke(effects, [true, oldRun])!;
+
+        Assert.Null(result);
+        Assert.True(effects.Current!.Running);
+        Assert.Equal("wave", effects.Current.Kind);
+        Assert.Equal(0, gateway.PendingCommands);
+        Assert.Equal(2, events.Effects.Count);
+    }
+
     [Fact]
     public async Task FlowStartsFromTheSelectedNodeAndStops()
     {
