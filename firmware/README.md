@@ -81,3 +81,9 @@ balloon は XIAO ESP32C3 の **D0/D1/D2 (GPIO2/3/4)** を **LEDC 5kHz / 8bit** �
 ## Arduino BLE Mesh の注意
 
 Arduino-ESP32 のプリビルド `libbt.a` は `CONFIG_BLE_MESH_NODE` が無効な sdkconfig でビルドされています。`balloon` / `gateway` はヘッダ構造体を有効化するため `-DCONFIG_BLE_MESH_NODE=1` を付けていますが、実機 Provisioning はプリビルド構成に依存します。詳細は `../docs/decisions.md` を参照してください。
+
+## モバイルバッテリー停止防止（balloon、オプション）
+
+外部のスイッチ式負荷回路がある場合、未使用の出力可能な GPIO を `-DBM_KEEPALIVE_GPIO=<GPIO番号>` で指定すると、起動時から30秒ごとに3秒間その GPIO を High にします。指定しない場合は無効です。既存の RGB LED や起動・通信に使うピンとの重複を避けてください。GPIO はスイッチの制御信号であり、150mA の負荷を GPIO に直接接続しないでください。
+
+実際に流れる USB 電流は負荷回路と端末自身の消費電流で決まり、この設定だけでは150mAを保証できません。バッテリーの停止条件と回路の定格を確認し、USB電流と発熱を実測してください。バッテリーの型番と回路は未確定で、実機では未検証です。
