@@ -503,7 +503,7 @@
       <div class="field-grid">
         {#if params.kind === 'flow'}
           <label class="field wide">
-            <span>起点ノード</span>
+            <span>起点ノード（地図のノードをクリックして選択できます）</span>
             <select value={selectedOrigin ?? ''} onchange={(event) => selectOrigin(eventValue(event))}>
               <option value="">自動（重心）</option>
               {#each balloons as balloon}
