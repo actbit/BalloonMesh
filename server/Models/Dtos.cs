@@ -138,7 +138,7 @@ public sealed record EffectStartRequest(
     int? FrameIntervalMs = null,
     bool ClearOnStop = false);
 
-public sealed record EffectStopRequest(bool Clear = false);
+public sealed record EffectStopRequest(bool Clear = false, bool AtCycleEnd = false);
 
 public sealed record EffectStateDto(
     string Kind,
@@ -159,7 +159,9 @@ public sealed record EffectStateDto(
     int FrameIntervalMs,
     double DurationSeconds,
     DateTimeOffset StartedAt,
-    DateTimeOffset? EndsAt);
+    DateTimeOffset? EndsAt,
+    DateTimeOffset? StopAt = null,
+    string? NextKind = null);
 
 public sealed record InitialPositionRequest(double Lat, double Lon);
 

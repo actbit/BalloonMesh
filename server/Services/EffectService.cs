@@ -22,6 +22,7 @@ public sealed class EffectService : BackgroundService
     private readonly ILogger<EffectService> _logger;
     private readonly object _gate = new();
     private EffectRun? _run;
+    private EffectRun? _pendingRun;
     private EffectStateDto? _last;
 
     public EffectService(
@@ -77,7 +78,7 @@ public sealed class EffectService : BackgroundService
         var width = Math.Clamp(request.Width ?? defaults.Width, 0.05, 1);
         var direction = NormalizeAngle(request.DirectionDeg ?? defaults.DirectionDeg);
         var frameInterval = Math.Clamp(request.FrameIntervalMs ?? 250, 100, 2000);
-        var duration = Math.Clamp(request.DurationSeconds ?? 30, 0, 3600);
+        var duration = Math.Clamp(request.DurationSeconds ?? 0, 0, 3600);
         var now = _time.GetUtcNow();
 
         var run = new EffectRun(
@@ -102,10 +103,23 @@ public sealed class EffectService : BackgroundService
             NextFrameAt = now
         };
 
-        var state = run.ToState(running: true);
+        EffectStateDto state;
         lock (_gate)
         {
-            _run = run;
+            if (_run is not null)
+            {
+                if (_run.StopAt is not null)
+                {
+                    throw new ArgumentException("The effect is stopping. Wait until it has stopped.");
+                }
+                _pendingRun = run;
+                state = _run.ToState(running: true) with { NextKind = run.Kind };
+            }
+            else
+            {
+                _run = run;
+                state = run.ToState(running: true);
+            }
             _last = state;
         }
         _logger.LogInformation("effect {Kind} started (origin={Origin}, duration={Duration}s)",
@@ -114,8 +128,36 @@ public sealed class EffectService : BackgroundService
         return state;
     }
 
-    public Task<EffectStateDto?> StopAsync(bool clear, CancellationToken cancellationToken) =>
-        StopAsync(clear, expectedRun: null);
+    public async Task<EffectStateDto?> StopAtCycleEndAsync(CancellationToken cancellationToken)
+    {
+        EffectStateDto? state;
+        lock (_gate)
+        {
+            if (_run is null)
+            {
+                return _last;
+            }
+
+            var run = _run;
+            _pendingRun = null;
+            if (run.StopAt is null)
+            {
+                var period = run.PeriodSeconds;
+                var now = _time.GetUtcNow();
+                var elapsed = Math.Max(0, (now - run.StartedAt).TotalSeconds);
+                var cycles = Math.Floor(elapsed / period) + 1;
+                run.StopAt = run.StartedAt.AddSeconds(cycles * period);
+                if (run.EndsAt is { } endsAt && endsAt < run.StopAt)
+                {
+                    run.StopAt = endsAt;
+                }
+            }
+            state = run.ToState(running: true);
+            _last = state;
+        }
+        await _notifier.EffectChangedAsync(state);
+        return state;
+    }
 
     private async Task<EffectStateDto?> StopAsync(bool clear, EffectRun? expectedRun)
     {
@@ -127,7 +169,8 @@ public sealed class EffectService : BackgroundService
                 return null;
             }
             _run = null;
-            state = _last is null ? null : _last with { Running = false };
+            _pendingRun = null;
+            state = _last is null ? null : _last with { Running = false, StopAt = null, NextKind = null };
             _last = state;
             if (state is not null && clear)
             {
@@ -168,9 +211,13 @@ public sealed class EffectService : BackgroundService
     private async Task PumpAsync(CancellationToken cancellationToken)
     {
         EffectRun? run;
+        DateTimeOffset? scheduledStop;
+        bool hasPending;
         lock (_gate)
         {
             run = _run;
+            scheduledStop = run?.StopAt;
+            hasPending = _pendingRun is not null;
         }
         if (run is null)
         {
@@ -178,25 +225,59 @@ public sealed class EffectService : BackgroundService
         }
 
         var now = _time.GetUtcNow();
-        if (run.EndsAt is { } endsAt && now >= endsAt)
+        if (scheduledStop is { } stopAt && now >= stopAt)
         {
-            await StopAsync(run.ClearOnStop, run);
+            await StopAsync(clear: true, run);
+            return;
+        }
+        if (!hasPending && run.EndsAt is { } endsAt && now >= endsAt)
+        {
+            await StopAsync(clear: true, run);
             return;
         }
 
-        if (now < run.NextFrameAt)
-        {
-            return;
-        }
+        EffectStateDto? changed = null;
         lock (_gate)
         {
             if (!ReferenceEquals(_run, run))
             {
                 return;
             }
-            run.NextFrameAt = now.AddMilliseconds(run.FrameIntervalMs);
-            RenderFrame(run, now);
+            var elapsed = Math.Max(0, (now - run.StartedAt).TotalSeconds);
+            var cycle = (long)Math.Floor(elapsed / run.PeriodSeconds);
+            if (run.InBlackout)
+            {
+                if (now >= run.NextFrameAt)
+                {
+                    run.InBlackout = false;
+                    run.LastCycle = cycle;
+                    run.NextFrameAt = now.AddMilliseconds(run.FrameIntervalMs);
+                    RenderFrame(run, now);
+                }
+            }
+            else if (cycle > run.LastCycle)
+            {
+                run.LastCycle = cycle;
+                SendBlackFrame();
+                run.LastColors.Clear();
+                run.NextFrameAt = now.Add(PumpInterval);
+                run.InBlackout = true;
+                if (_pendingRun is { } next)
+                {
+                    next.BeginAt(now, PumpInterval);
+                    _run = next;
+                    _pendingRun = null;
+                    changed = next.ToState(running: true);
+                    _last = changed;
+                }
+            }
+            else if (now >= run.NextFrameAt)
+            {
+                run.NextFrameAt = now.AddMilliseconds(run.FrameIntervalMs);
+                RenderFrame(run, now);
+            }
         }
+        if (changed is not null) await _notifier.EffectChangedAsync(changed);
     }
 
     private void RenderFrame(EffectRun run, DateTimeOffset now)
@@ -444,7 +525,8 @@ public sealed class EffectService : BackgroundService
             DurationSeconds = durationSeconds;
             ClearOnStop = clearOnStop;
             StartedAt = startedAt;
-            EndsAt = durationSeconds > 0 ? startedAt.AddSeconds(durationSeconds) : null;
+            var period = Math.Max(kind == "pulse" ? 0.2 : 0, wavelength / speed);
+            EndsAt = durationSeconds > 0 ? startedAt.AddSeconds(Math.Ceiling(durationSeconds / period) * period) : null;
         }
 
         public string Kind { get; }
@@ -466,10 +548,22 @@ public sealed class EffectService : BackgroundService
         public int FrameIntervalMs { get; }
         public double DurationSeconds { get; }
         public bool ClearOnStop { get; }
-        public DateTimeOffset StartedAt { get; }
-        public DateTimeOffset? EndsAt { get; }
+        public DateTimeOffset StartedAt { get; private set; }
+        public DateTimeOffset? EndsAt { get; private set; }
         public DateTimeOffset NextFrameAt { get; set; }
+        public double PeriodSeconds => Math.Max(Kind == "pulse" ? 0.2 : 0, Wavelength / Speed);
+        public long LastCycle { get; set; }
+        public bool InBlackout { get; set; }
+        public DateTimeOffset? StopAt { get; set; }
         public Dictionary<ushort, (byte R, byte G, byte B)> LastColors { get; } = [];
+
+        public void BeginAt(DateTimeOffset now, TimeSpan blackout)
+        {
+            StartedAt = now;
+            EndsAt = DurationSeconds > 0 ? now.AddSeconds(Math.Ceiling(DurationSeconds / PeriodSeconds) * PeriodSeconds) : null;
+            NextFrameAt = now.Add(blackout);
+            InBlackout = true;
+        }
 
         public EffectStateDto ToState(bool running) => new(
             Kind,
@@ -490,6 +584,7 @@ public sealed class EffectService : BackgroundService
             FrameIntervalMs,
             DurationSeconds,
             StartedAt,
-            EndsAt);
+            EndsAt,
+            StopAt);
     }
 }

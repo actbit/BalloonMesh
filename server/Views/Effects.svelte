@@ -60,6 +60,8 @@
     durationSeconds: number;
     startedAt: string;
     endsAt: string | null;
+    stopAt: string | null;
+    nextKind: string | null;
   };
 
   type Balloon = MapBalloon & {
@@ -97,7 +99,6 @@
   let logLines = $state<string[]>([]);
   let mapError = $state('');
   let busy = $state(false);
-  let clearOnStop = $state(true);
   let trailPreview = $state(true);
 
   let fleetMap: FleetMap | null = null;
@@ -127,6 +128,9 @@
     if (!effect.running) {
       return '停止中';
     }
+    if (effect.stopAt) {
+      return `あと約${Math.max(0, Math.ceil((Date.parse(effect.stopAt) - clock) / 1000))}秒`;
+    }
     if (effect.durationSeconds <= 0 || !effect.endsAt) {
       return '連続';
     }
@@ -134,6 +138,9 @@
     return `${seconds}s`;
   });
   const progress = $derived.by(() => {
+    if (!effect?.running) {
+      return 0;
+    }
     if (!effect || effect.durationSeconds <= 0 || !effect.endsAt) {
       return effect?.running ? 100 : 0;
     }
@@ -186,7 +193,7 @@
     } else {
       effect = null;
     }
-    if (selectedOrigin == null && balloons.length > 0) {
+    if (first && selectedOrigin == null && balloons.length > 0) {
       selectedOrigin = balloons[0].meshAddress;
     }
     fleetMap?.setBalloons(balloons, selectedOrigin);
@@ -264,12 +271,12 @@
           b2: params.b2,
           durationSeconds: params.durationSeconds,
           frameIntervalMs: params.frameIntervalMs,
-          clearOnStop
+          clearOnStop: true
         })
       });
       effect = state as EffectState;
       effectStartedMs = Date.parse(effect.startedAt);
-      addLog(`${effect.label} を開始`);
+      addLog(effect.nextKind ? '次の周から設定を変更します' : `${effect.label} を開始`);
     } catch (error) {
       addLog(`エフェクト開始に失敗: ${(error as Error).message}`);
     } finally {
@@ -285,11 +292,10 @@
     try {
       const state = await api('/api/effects/stop', {
         method: 'POST',
-        body: JSON.stringify({ clear: clearOnStop })
+        body: JSON.stringify({ atCycleEnd: true })
       });
       effect = state ?? (effect ? { ...effect, running: false } : null);
-      previewSeconds = 0;
-      addLog(clearOnStop ? '停止して消灯しました' : 'エフェクトを停止しました');
+      addLog('次の1周の終わりに消灯して停止します');
     } catch (error) {
       addLog(`停止に失敗: ${(error as Error).message}`);
     } finally {
@@ -363,7 +369,7 @@
       effect = value;
       if (value?.running) {
         effectStartedMs = Date.parse(value.startedAt);
-        addLog(`${value.label} を開始`);
+        addLog(value.stopAt ? '次の1周の終わりに送信を終了します' : value.nextKind ? '次の周から設定を変更します' : `${value.label} を開始`);
       } else if (value) {
         previewSeconds = 0;
         addLog(`${value.label} を停止`);
@@ -484,14 +490,15 @@
     <section class="panel composer">
       <div class="panel-head">
         <div>
-          <p class="eyebrow">Effect composer</p>
-          <h2>光の動きを選ぶ</h2>
+          <p class="eyebrow">ライトの設定</p>
+          <h2>どんな光にしますか？</h2>
         </div>
         <span class="state-pill" class:live={effect?.running}>
-          {effect?.running ? 'RUNNING' : 'PREVIEW'}
+          {effect?.stopAt ? '終了待ち' : effect?.nextKind ? '変更待ち' : effect?.running ? '点灯中' : 'プレビュー中'}
         </span>
       </div>
 
+      <p class="step-label">1　動きを選ぶ</p>
       <div class="preset-grid">
         {#each effectPresets as item}
           {@render presetCard(item)}
@@ -500,25 +507,26 @@
 
       <p class="preset-desc"><strong>{preset.label}</strong> — {preset.description}</p>
 
+      <p class="step-label">2　光を設定する</p>
       <div class="field-grid">
         {#if params.kind === 'flow'}
           <label class="field wide">
-            <span>起点ノード（地図のノードをクリックして選択できます）</span>
+            <span>光が広がる起点</span>
             <select value={selectedOrigin ?? ''} onchange={(event) => selectOrigin(eventValue(event))}>
               <option value="">自動（重心）</option>
               {#each balloons as balloon}
                 <option value={balloon.meshAddress}>{balloon.name} · {formatAddress(balloon.meshAddress)}</option>
               {/each}
             </select>
+            <small class="field-help">地図の丸をクリックしても選べます。</small>
           </label>
         {/if}
 
         {#if params.kind !== 'rainbow'}
           <div class="field wide">
-            <span>主色 / 残光色</span>
+            <span>光の色</span>
             <div class="colour-row">
-              {@render colourPicker(primaryHex, (hex) => setPrimary(hex))}
-              {@render colourPicker(secondaryHex, (hex) => setSecondary(hex))}
+              {@render colourPicker('光の色', primaryHex, (hex) => setPrimary(hex))}
             </div>
             <div class="presets">
               {#each colourPresets as colour}
@@ -530,59 +538,71 @@
           </div>
         {/if}
 
-        {#if params.kind === 'pulse'}
-          {@render rangeField('周期', 's', 0.5, 20, 0.5, params.wavelength / Math.max(0.5, params.speed), (value) => (params.wavelength = value * Math.max(0.5, params.speed)))}
-        {:else}
-          {@render rangeField('速度', 'm/s', 1, 200, 1, params.speed, (value) => (params.speed = value))}
-          {@render rangeField('波長', 'm', 5, 600, 5, params.wavelength, (value) => (params.wavelength = value))}
-        {/if}
-
-        {#if params.kind === 'flow' || params.kind === 'wave'}
-          {@render rangeField('残光の長さ', '', 0.05, 1, 0.01, params.width, (value) => (params.width = value))}
-        {/if}
-
-        {#if params.kind === 'wave'}
-          {@render rangeField('進行方向', '°', 0, 359, 1, params.directionDeg, (value) => (params.directionDeg = value))}
-        {/if}
-
-        {@render rangeField('継続時間', 's（0 で連続）', 0, 120, 5, params.durationSeconds, (value) => (params.durationSeconds = value))}
       </div>
 
-      <div class="actions">
-        <button class="primary" onclick={startEffect}
-                disabled={!model.canOperate || busy || positionedCount === 0}>
-          {effect?.running ? 'この内容で再適用' : 'このエフェクトを開始'}
-        </button>
-        <button onclick={stopEffect} disabled={!effect?.running || busy}>停止</button>
-        <label class="check">
-          <input type="checkbox" bind:checked={clearOnStop} />
-          停止時に消灯
-        </label>
-      </div>
+      <details class="advanced">
+        <summary>動きの詳しい設定</summary>
+        <div class="field-grid advanced-fields">
+          {#if params.kind !== 'rainbow'}
+            <div class="field wide"><span>残光色</span>
+              <div class="colour-row">{@render colourPicker('残光色', secondaryHex, (hex) => setSecondary(hex))}</div>
+            </div>
+          {/if}
+          {#if params.kind === 'pulse'}
+            {@render rangeField('明滅の周期', '秒', 0.5, 20, 0.5, params.wavelength / Math.max(0.5, params.speed), (value) => (params.wavelength = value * Math.max(0.5, params.speed)))}
+          {:else}
+            {@render rangeField('速度', 'm/s', 1, 200, 1, params.speed, (value) => (params.speed = value))}
+            {@render rangeField('波長', 'm', 5, 600, 5, params.wavelength, (value) => (params.wavelength = value))}
+          {/if}
+          {#if params.kind === 'flow' || params.kind === 'wave'}
+            {@render rangeField('残光の長さ', '', 0.05, 1, 0.01, params.width, (value) => (params.width = value))}
+          {/if}
+          {#if params.kind === 'wave'}
+            {@render rangeField('進行方向', '°', 0, 359, 1, params.directionDeg, (value) => (params.directionDeg = value))}
+          {/if}
+        </div>
+      </details>
 
       {#if !model.canOperate}
         <p class="hint">Operator 以上のロールでエフェクトを開始できます。</p>
       {:else if positionedCount === 0}
         <p class="hint">位置情報のあるノードがありません。デモを開始すると 50 ノードが動き出します。</p>
       {:else}
-        <p class="hint">プレビューはブラウザ内で計算しています。開始するとサーバーが各ノードへ LED コマンドを配信します。</p>
+        <p class="hint">地図は設定のプレビューです。開始するとライトは繰り返し点灯します。</p>
       {/if}
+      <div class="action-bar">
+        <p class="step-label">3　地図で確認して開始</p>
+        <div class="actions">
+          <button class="primary" onclick={startEffect}
+                  disabled={!model.canOperate || busy || positionedCount === 0 || !!effect?.stopAt}>
+            {effect?.running ? '次の周からこの設定に変更' : 'ループを開始'}
+          </button>
+          {#if effect?.running}
+            <button onclick={stopEffect} disabled={busy || !!effect.stopAt}>
+              {effect.stopAt ? '終了待ち' : '周の終わりで送信を終了'}
+            </button>
+          {/if}
+        </div>
+        {#if effect?.stopAt}
+          <p class="hint">周の終わりに消灯して送信を終了します。次の設定は今から準備できます。</p>
+        {:else if effect?.running}
+          <p class="hint">色や動きを変更したら、次の周から反映できます。送信終了を選ぶと変更予約は取り消されます。</p>
+        {/if}
+      </div>
     </section>
 
     <aside class="side">
       <section class="panel live-panel">
         <div class="panel-head compact">
           <div>
-            <p class="eyebrow">Now</p>
-            <h2>{effect ? effect.label : '待機中'}</h2>
+            <p class="eyebrow">ライトの状態</p>
+            <h2>{effect?.stopAt ? '周の終わりで終了' : effect?.nextKind ? '次の周から変更' : effect?.running ? 'ループ中' : '待機中'}</h2>
           </div>
           <span class="live-dot" class:on={effect?.running}></span>
         </div>
         <dl class="mini-grid">
-          <div><dt>起点</dt><dd>{effect?.originName ?? originBalloon?.name ?? '重心'}</dd></div>
+          <div><dt>起点</dt><dd>{effect?.running ? (effect.originName ?? '重心') : (originBalloon?.name ?? '重心')}</dd></div>
           <div><dt>残り</dt><dd>{remainingLabel}</dd></div>
-          <div><dt>速度</dt><dd>{effect ? effect.speed : params.speed} m/s</dd></div>
-          <div><dt>波長</dt><dd>{effect ? effect.wavelength : params.wavelength} m</dd></div>
         </dl>
         <div class="progress"><span style={`width:${progress}%`}></span></div>
         <div class="preview-toggle">
@@ -593,11 +613,12 @@
         </div>
       </section>
 
-      <section class="panel fleet-panel">
+      <details class="panel fleet-panel">
+        <summary class="side-summary">ノード一覧 <span>{positionedCount}台</span></summary>
         <div class="panel-head compact">
           <div>
-            <p class="eyebrow">Fleet</p>
-            <h2>{positionedCount} positioned</h2>
+            <p class="eyebrow">地図上のノード</p>
+            <h2>選択して起点を変更</h2>
           </div>
           <span class="state-pill">{params.kind.toUpperCase()}</span>
         </div>
@@ -606,12 +627,13 @@
             {@render nodeRow(balloon)}
           {/each}
         </div>
-      </section>
+      </details>
 
-      <section class="panel log-panel">
+      <details class="panel log-panel">
+        <summary class="side-summary">操作履歴</summary>
         <div class="panel-head compact">
           <div>
-            <p class="eyebrow">Activity</p>
+            <p class="eyebrow">履歴</p>
             <h2>イベント</h2>
           </div>
         </div>
@@ -622,7 +644,7 @@
             {#each logLines as line}<li>{line}</li>{/each}
           </ul>
         {/if}
-      </section>
+      </details>
     </aside>
   </main>
 
@@ -648,9 +670,9 @@
   </div>
 {/snippet}
 
-{#snippet colourPicker(hex, onInput)}
+{#snippet colourPicker(label, hex, onInput)}
   <label class="colour-picker">
-    <input type="color" value={hex} oninput={(event) => onInput(eventValue(event))} />
+    <input type="color" aria-label={label} value={hex} oninput={(event) => onInput(eventValue(event))} />
     <span>{hex.toUpperCase()}</span>
   </label>
 {/snippet}
@@ -829,6 +851,13 @@
 
   .preset-desc { margin: 12px 0 14px; font-size: 11px; line-height: 1.6; color: #94a3b8; }
   .preset-desc strong { color: #e2e8f0; }
+  .step-label { margin: 17px 0 8px; color: #bae6fd; font-size: 12px; font-weight: 700; }
+  .field-help { color: #94a3b8; font-size: 10px; }
+  .advanced { margin-top: 14px; border-top: 1px solid rgba(148, 163, 184, 0.18); padding-top: 10px; }
+  .advanced summary, .side-summary { color: #cbd5e1; font-size: 12px; font-weight: 700; cursor: pointer; }
+  .advanced-fields { margin-top: 12px; }
+  .side-summary span { float: right; color: #94a3b8; font-weight: 400; }
+  .side-summary + .panel-head { margin-top: 14px; }
 
   .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
   .field { display: flex; flex-direction: column; gap: 5px; }
@@ -865,6 +894,9 @@
   .preset-swatch:hover { transform: scale(1.12); }
 
   .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+  .action-bar { position: sticky; bottom: -16px; margin: 0 -16px -16px; padding: 1px 16px 16px; background: #0b1928; border-top: 1px solid rgba(148, 163, 184, 0.18); }
+  .action-bar .step-label { margin: 10px 0 0; }
+  .action-bar .actions { margin-top: 8px; }
   .check { display: flex; align-items: center; gap: 6px; font-size: 10px; color: #94a3b8; }
   .check input { accent-color: #38bdf8; }
 
@@ -885,7 +917,7 @@
   button:disabled { opacity: 0.42; cursor: not-allowed; }
   button:disabled:hover { border-color: rgba(148, 163, 184, 0.25); background: rgba(15, 23, 42, 0.75); }
 
-  .hint { margin: 10px 0 0; font-size: 10px; line-height: 1.5; color: #64748b; }
+  .hint { margin: 10px 0 0; font-size: 10px; line-height: 1.5; color: #94a3b8; }
 
   .live-panel, .fleet-panel, .log-panel { flex: 0 0 auto; }
   .live-dot {

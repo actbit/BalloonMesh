@@ -324,7 +324,7 @@ app.MapPost("/api/effects/start", async (EffectStartRequest request, EffectServi
 app.MapPost("/api/effects/stop", async (EffectStopRequest request, EffectService effects,
     CancellationToken cancellationToken) =>
 {
-    var state = await effects.StopAsync(request.Clear, cancellationToken);
+    var state = await effects.StopAtCycleEndAsync(cancellationToken);
     return state is null ? Results.NoContent() : Results.Ok(state);
 }).RequireAuthorization(AuthRoles.Operator);
 

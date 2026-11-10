@@ -285,9 +285,11 @@ pio run -t upload
 `EffectService` が効果を毎フレーム展開し、既存の `LED_SET_NOW` を各バルーンへ送ります。ファームウェアに新しいオペコードは不要です。ブラウザ側のプレビューは `Views/lib/effect-model.svelte.ts`、実機配信は `Services/EffectService.cs` が同じ式で計算します。
 
 - `GET /api/effects` — 現在のエフェクト状態
-- `POST /api/effects/start` — 抽象エフェクトを開始（Operator 以上）
-- `POST /api/effects/stop` — 停止（`{ "clear": true }` で消灯）
-- SignalR `effectChanged` — 開始・停止を全クライアントへ通知
+- `POST /api/effects/start` — 抽象エフェクトを開始（Operator 以上）。実行中の変更は次の周期から反映
+- `POST /api/effects/stop` — 次の周期の終わりに消灯し、配信を終了（途中での強制停止は行わない）
+- SignalR `effectChanged` — 開始・変更予約・終了予約・終了を全クライアントへ通知。終了予約中は `stopAt`、変更予約中は `nextKind` が入る
+
+画面では繰り返し点灯が既定です。各周期の終わりに全ノードへ消灯を送り、約40ms以上の間隔を置いて次の周期を配信します。色や動きの変更は、この区切りで反映されます。送信終了を予約すると、変更予約を取り消して区切りの消灯後に配信を終了します。
 
 ### SvelteSharp Client モード
 

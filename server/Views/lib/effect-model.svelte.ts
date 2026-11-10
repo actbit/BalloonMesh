@@ -91,7 +91,7 @@ export function defaultParams(kind = 'flow') {
     r2: 0,
     g2: 0,
     b2: 0,
-    durationSeconds: 30,
+    durationSeconds: 0,
     frameIntervalMs: 250
   };
 }
