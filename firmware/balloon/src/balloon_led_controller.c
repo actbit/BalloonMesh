@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 
 #include "balloon_clock.h"
+#include "balloon_keepalive.h"
 #include "bm_led_output.h"
 #include "balloon_persistence.h"
 #include "balloon_protocol.h"
@@ -24,6 +25,7 @@ typedef struct {
     bool initialized;
     bool dirty;
     uint32_t last_save_ms;
+    bm_keepalive_t keepalive;
 } bm_led_controller_t;
 
 static bm_led_controller_t s_controller;
@@ -43,6 +45,19 @@ static void mark_dirty_locked(void) {
 static void refresh_monitor_locked(void) {
     int event = bm_queue_monitor_update(&s_controller.monitor, s_controller.queue.count);
     send_monitor_event_locked(event, s_controller.queue.count);
+}
+
+/* Caller holds the controller lock so pulses cannot overwrite a new command. */
+static void update_output_locked(uint32_t now_ms, bool force) {
+    bm_rgb_t rgb = s_controller.queue.current;
+    bool lit = rgb.r != 0 || rgb.g != 0 || rgb.b != 0;
+    bool changed = bm_keepalive_update(&s_controller.keepalive, now_ms, lit);
+    if (force || changed) {
+        if (s_controller.keepalive.active) {
+            rgb.r = rgb.g = rgb.b = 38; /* 15% of 255, rounded */
+        }
+        bm_led_output_set(rgb.r, rgb.g, rgb.b);
+    }
 }
 
 static void led_task(void *argument) {
@@ -83,11 +98,11 @@ static void led_task(void *argument) {
                     s_controller.last_save_ms = now_ms;
                 }
             }
+            update_output_locked(now_ms, has_output);
             xSemaphoreGive(s_controller.lock);
         }
 
         if (has_output) {
-            bm_led_output_set(output.r, output.g, output.b);
             ESP_LOGI(TAG, "executed RGB %u,%u,%u", output.r, output.g, output.b);
         }
 
@@ -118,6 +133,7 @@ void bm_led_controller_init(bm_queue_status_sender_t sender) {
     }
     s_controller.sender = sender;
     s_controller.last_save_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    s_controller.keepalive.last_start_ms = s_controller.last_save_ms;
     s_controller.initialized = true;
     xTaskCreate(led_task, "led_queue", 4096, NULL, 6, NULL);
 }
@@ -131,7 +147,6 @@ void bm_led_controller_handle_opcode(uint32_t opcode,
     bool synced = bm_clock_is_synced();
     uint64_t now = synced ? bm_clock_now_tick40() : 0;
     bool emit_output = false;
-    bm_rgb_t output = {0, 0, 0};
 
     if (xSemaphoreTake(s_controller.lock, pdMS_TO_TICKS(100)) != pdTRUE) {
         ESP_LOGW(TAG, "queue lock timeout");
@@ -161,7 +176,6 @@ void bm_led_controller_handle_opcode(uint32_t opcode,
             bm_rgb_t rgb = {value.r, value.g, value.b};
             result = bm_ledq_set_now(&s_controller.queue, value.issued_tick, rgb);
             if (result == BM_LEDQ_APPLIED) {
-                output = rgb;
                 emit_output = true;
             }
         }
@@ -171,7 +185,6 @@ void bm_led_controller_handle_opcode(uint32_t opcode,
         if (bm_decode_led_reset_and_set(data, length, &cutoff, &rgb)) {
             result = bm_ledq_reset_and_set(&s_controller.queue, cutoff, rgb);
             if (result == BM_LEDQ_APPLIED) {
-                output = rgb;
                 emit_output = true;
             }
         }
@@ -182,11 +195,10 @@ void bm_led_controller_handle_opcode(uint32_t opcode,
         refresh_monitor_locked();
     }
     uint16_t count = s_controller.queue.count;
-    xSemaphoreGive(s_controller.lock);
-
     if (emit_output) {
-        bm_led_output_set(output.r, output.g, output.b);
+        update_output_locked((uint32_t)(esp_timer_get_time() / 1000), true);
     }
+    xSemaphoreGive(s_controller.lock);
     if (result != BM_LEDQ_INVALID) {
         ESP_LOGI(TAG, "opcode=0x%06lx result=%d queue=%u", (unsigned long)opcode,
                  (int)result, count);

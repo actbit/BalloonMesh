@@ -1,9 +1,6 @@
 #include <Arduino.h>
 
 #include "esp_log.h"
-#include "driver/gpio.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "nvs_flash.h"
 
 #include "balloon_clock.h"
@@ -17,22 +14,6 @@
 
 static const char *TAG = "balloon";
 
-/* The GPIO drives an external switched load, never the load directly. */
-#ifdef BM_KEEPALIVE_GPIO
-static void keepalive_task(void *argument) {
-    (void)argument;
-    const gpio_num_t pin = (gpio_num_t)BM_KEEPALIVE_GPIO;
-    gpio_set_level(pin, 0);
-    gpio_set_direction(pin, GPIO_MODE_OUTPUT);
-    for (;;) {
-        gpio_set_level(pin, 1);
-        vTaskDelay(pdMS_TO_TICKS(3000));
-        gpio_set_level(pin, 0);
-        vTaskDelay(pdMS_TO_TICKS(27000));
-    }
-}
-#endif
-
 void setup() {
     Serial.begin(115200);
     delay(200);
@@ -44,12 +25,6 @@ void setup() {
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
-
-#ifdef BM_KEEPALIVE_GPIO
-    if (xTaskCreate(keepalive_task, "keepalive", 2048, NULL, 2, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "keepalive task could not be started");
-    }
-#endif
 
     bm_clock_init();
     bm_led_output_init();
