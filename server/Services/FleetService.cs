@@ -107,7 +107,7 @@ public sealed class FleetService
     }
 
     public StateDto GetState(IReadOnlyList<GatewayDto> gateways, bool simulationRunning,
-        string version, EffectStateDto? effect = null) => new(
+        string version, EffectStateDto? effect = null, LedShadowSnapshotDto? ledShadow = null) => new(
         DateTimeOffset.UtcNow,
         version,
         simulationRunning,
@@ -115,7 +115,8 @@ public sealed class FleetService
         GetAnchors(),
         gateways,
         GetGroups(),
-        effect);
+        effect,
+        ledShadow);
 
     public BalloonDto SetInitialPosition(ushort meshAddress, double lat, double lon)
     {

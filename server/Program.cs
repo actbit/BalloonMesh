@@ -25,6 +25,7 @@ builder.Services.AddSingleton<NeighborStore>();
 builder.Services.AddSingleton<GatewayRegistry>();
 builder.Services.AddSingleton<MonitorNotifier>();
 builder.Services.AddSingleton<IMonitorEvents>(serviceProvider => serviceProvider.GetRequiredService<MonitorNotifier>());
+builder.Services.AddSingleton<LedShadowService>();
 builder.Services.AddSingleton<FtmAggregator>();
 builder.Services.AddSingleton<MeshReportRouter>();
 builder.Services.AddSingleton<LedDispatchService>();
@@ -34,6 +35,7 @@ builder.Services.AddSingleton<SimulationService>();
 builder.Services.AddSingleton<EffectService>();
 builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<SimulationService>());
 builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<EffectService>());
+builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<LedShadowService>());
 builder.Services.AddHostedService<AggregationWorker>();
 builder.Services.AddHostedService<ShowRecoveryWorker>();
 builder.Services.AddHostedService<LedDispatchWorker>();
@@ -74,9 +76,10 @@ app.Map("/ws/gateway", async context =>
     using var socket = await context.WebSockets.AcceptWebSocketAsync();
     var registry = context.RequestServices.GetRequiredService<GatewayRegistry>();
     var router = context.RequestServices.GetRequiredService<MeshReportRouter>();
+    var shadow = context.RequestServices.GetRequiredService<LedShadowService>();
     var logger = context.RequestServices.GetRequiredService<ILoggerFactory>()
         .CreateLogger("GatewayWebSocket");
-    await GatewayWebSocket.HandleAsync(socket, context, registry, router, logger,
+    await GatewayWebSocket.HandleAsync(socket, context, registry, router, shadow, logger,
         GatewayAuth.ConfiguredToken(context.RequestServices.GetRequiredService<IConfiguration>()),
         context.RequestAborted);
 });
@@ -159,9 +162,9 @@ app.MapGet("/api/health", () => Results.Ok(new
 })).AllowAnonymous();
 
 app.MapGet("/api/state", (FleetService fleet, GatewayRegistry gateways,
-    SimulationService simulation, EffectService effects) =>
+    SimulationService simulation, EffectService effects, LedShadowService shadow) =>
     Results.Ok(fleet.GetState(gateways.Snapshot(), simulation.Running, ServerInfo.Version,
-        effects.Current)))
+        effects.Current, shadow.Capture())))
     .RequireAuthorization(AuthRoles.Viewer);
 
 app.MapGet("/api/balloons", (FleetService fleet) => Results.Ok(fleet.GetBalloons()))
@@ -374,7 +377,7 @@ app.MapPost("/api/gateway/{id}/events",
     });
 
 app.MapGet("/api/gateway/{id}/commands",
-    async (HttpContext http, string id, int? waitMs, GatewayRegistry registry,
+    async (HttpContext http, string id, int? waitMs, GatewayRegistry registry, LedShadowService shadow,
         IConfiguration configuration, CancellationToken cancellationToken) =>
     {
         if (!GatewayAuth.IsAuthorized(http, configuration))
@@ -389,9 +392,11 @@ app.MapGet("/api/gateway/{id}/commands",
             return Results.NoContent();
         }
 
+        shadow.ObserveDelivered(first);
         var commands = new List<GatewayCommandDto> { first.ToDto() };
         while (commands.Count < 32 && registry.TryReadCommand(id, out var next) && next is not null)
         {
+            shadow.ObserveDelivered(next);
             commands.Add(next.ToDto());
         }
         return Results.Ok(new GatewayCommandsRequest(commands));

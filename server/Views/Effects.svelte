@@ -40,6 +40,8 @@
   };
   type MapBalloon = BalloonPoint & { r: number; g: number; b: number };
   type EffectColor = { meshAddress: number; r: number; g: number; b: number };
+  type ShadowNode = EffectColor & { known: boolean; queueCount: number; rejectedCount: number };
+  type ShadowSnapshot = { instanceId: string; revision: number; nodes: ShadowNode[] };
   type EffectState = {
     kind: string;
     label: string;
@@ -96,12 +98,13 @@
   let params = $state<EffectParams>(defaultParams());
   let effect = $state<EffectState | null>(null);
   let frameColors = $state<Record<number, { r: number; g: number; b: number }>>({});
+  let shadowNodes = $state<Record<number, ShadowNode>>({});
   let clock = $state(Date.now());
   let statusLine = $state('Connecting…');
   let logLines = $state<string[]>([]);
   let mapError = $state('');
   let busy = $state(false);
-  let trailPreview = $state(true);
+  let displayMode = $state('preview');
 
   let fleetMap: FleetMap | null = null;
   let hub: any = null;
@@ -110,6 +113,9 @@
   let clockTimer = 0;
   let previewSeconds = 0;
   let effectStartedMs = 0;
+  let shadowInstanceId = '';
+  let shadowRevision = -1;
+  const oldShadowInstances = new Set<string>();
 
   const colourPresets = ['#38bdf8', '#f472b6', '#facc15', '#22c55e', '#ef4444', '#a78bfa', '#ffffff'];
 
@@ -197,6 +203,7 @@
     balloons = state.balloons ?? [];
     anchors = state.anchors ?? [];
     gateways = state.gateways ?? [];
+    if (state.ledShadow) applyShadow(state.ledShadow);
     stateLoaded = true;
     if (state.effect) {
       effect = state.effect;
@@ -315,7 +322,39 @@
   }
 
   function colorOf(balloon: Balloon): { r: number; g: number; b: number } {
+    if (displayMode === 'shadow') {
+      const node = shadowNodes[balloon.meshAddress];
+      return node?.known ? node : { r: 0, g: 0, b: 0 };
+    }
     return frameColors[balloon.meshAddress] ?? balloon;
+  }
+
+  function applyShadow(snapshot: ShadowSnapshot) {
+    if (!snapshot || oldShadowInstances.has(snapshot.instanceId)) return;
+    if (shadowInstanceId !== snapshot.instanceId) {
+      if (shadowInstanceId) oldShadowInstances.add(shadowInstanceId);
+      shadowInstanceId = snapshot.instanceId;
+      shadowRevision = -1;
+    }
+    if (snapshot.revision < shadowRevision) return;
+    shadowRevision = snapshot.revision;
+    const next: Record<number, ShadowNode> = {};
+    for (const state of snapshot.nodes) next[state.meshAddress] = state;
+    shadowNodes = next;
+    if (displayMode === 'shadow') paintShadow();
+  }
+
+  function paintShadow() {
+    fleetMap?.setEffectColors(balloons.map((balloon) => {
+      const node = shadowNodes[balloon.meshAddress];
+      return node?.known ? node : { meshAddress: balloon.meshAddress, r: 0, g: 0, b: 0 };
+    }));
+  }
+
+  function selectDisplay(event: Event) {
+    displayMode = eventValue(event);
+    if (displayMode === 'shadow') paintShadow();
+    else previewFrame();
   }
 
   function nodeColorCss(balloon: Balloon): string {
@@ -339,10 +378,8 @@
       next[color.meshAddress] = { r: color.r, g: color.g, b: color.b };
     }
     frameColors = next;
-    if (trailPreview) {
+    if (displayMode === 'preview') {
       fleetMap?.setEffectColors(colors);
-    } else {
-      fleetMap?.clearEffectColors();
     }
   }
 
@@ -376,6 +413,7 @@
     hub.on('gatewaysUpdated', (value: Gateway[]) => {
       gateways = value;
     });
+    hub.on('ledShadowChanged', applyShadow);
     hub.on('effectChanged', (value: EffectState | null) => {
       effect = value;
       if (value?.running) {
@@ -622,10 +660,16 @@
         </dl>
         <div class="progress"><span style={`width:${progress}%`}></span></div>
         <div class="preview-toggle">
-          <label class="check">
-            <input type="checkbox" bind:checked={trailPreview} />
-            地図にプレビューを表示
+          <label class="field">
+            <span>地図の表示</span>
+            <select value={displayMode} onchange={selectDisplay}>
+              <option value="preview">編集中のプレビュー</option>
+              <option value="shadow">送信命令からの予測</option>
+            </select>
           </label>
+          {#if displayMode === 'shadow'}
+            <p class="hint">ゲートウェイへ渡した命令を時計同期済みとして実行した予測です。実機の受信確認ではありません。</p>
+          {/if}
         </div>
       </section>
 
@@ -703,6 +747,17 @@
     </span>
     <span class="node-meta">
       <small>{balloon.online === false ? 'offline' : 'online'}</small>
+      {#if displayMode === 'shadow'}
+        {#if shadowNodes[balloon.meshAddress]}
+          <small>予測の予約: {shadowNodes[balloon.meshAddress].queueCount}件</small>
+          {#if !shadowNodes[balloon.meshAddress].known}<small>予測色: 不明</small>{/if}
+        {:else}
+          <small>予測: 不明</small>
+        {/if}
+        {#if (shadowNodes[balloon.meshAddress]?.rejectedCount ?? 0) > 0}
+          <small>予測の除外: {shadowNodes[balloon.meshAddress]?.rejectedCount}件</small>
+        {/if}
+      {/if}
       <small>{balloon.lat == null ? 'no fix' : `${balloon.lat.toFixed(4)}, ${balloon.lon?.toFixed(4)}`}</small>
     </span>
   </button>

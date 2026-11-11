@@ -69,6 +69,10 @@ public sealed record GatewayDto(
 
 public sealed record GroupDto(int Id, string Name, ushort MeshGroupAddress, int BalloonCount);
 
+public sealed record LedShadowDto(ushort MeshAddress, bool Known, byte R, byte G, byte B,
+    int QueueCount, long RejectedCount);
+public sealed record LedShadowSnapshotDto(Guid InstanceId, long Revision, IReadOnlyList<LedShadowDto> Nodes);
+
 public sealed record StateDto(
     DateTimeOffset ServerTime,
     string Version,
@@ -77,7 +81,8 @@ public sealed record StateDto(
     IReadOnlyList<AnchorDto> Anchors,
     IReadOnlyList<GatewayDto> Gateways,
     IReadOnlyList<GroupDto> Groups,
-    EffectStateDto? Effect = null);
+    EffectStateDto? Effect = null,
+    LedShadowSnapshotDto? LedShadow = null);
 
 public sealed record CommandResultDto(
     bool Accepted,
@@ -201,6 +206,8 @@ public sealed record GatewayCommandsRequest(IReadOnlyList<GatewayCommandDto> Com
 
 public sealed record DownlinkCommand(ushort Dst, uint Opcode, byte[] Payload, int Ttl)
 {
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlyList<ushort>? ShadowRecipients { get; init; }
     public GatewayCommandDto ToDto() => new(Dst, Opcode, Convert.ToHexString(Payload), Ttl);
 }
 

@@ -16,6 +16,7 @@ public sealed class LedDispatchService
     private const int HardQueueDepth = 512;
 
     private readonly object _gate = new();
+    private readonly object _sendGate = new();
     private readonly List<PendingReservation> _pending = [];
     private readonly Dictionary<ushort, QueueEstimate> _estimates = [];
     private readonly Dictionary<ushort, ulong> _lastIssued = [];
@@ -91,7 +92,7 @@ public sealed class LedDispatchService
     public int SendImmediate(TargetSpec target, byte opcode, byte[] payload)
     {
         var command = new DownlinkCommand(target.Destination, BalloonProtocol.VendorOpcode(opcode), payload, 7);
-        return _gateways.Broadcast(command);
+        return BroadcastWithShadow(command, target);
     }
 
     public ulong NextIssuedTick(IEnumerable<ushort> addresses)
@@ -253,7 +254,7 @@ public sealed class LedDispatchService
                 BalloonProtocol.VendorOpcode(item.Opcode),
                 item.Payload,
                 7);
-            var gateways = _gateways.Broadcast(command);
+            var gateways = BroadcastWithShadow(command, item.Target);
             if (gateways == 0)
             {
                 lock (_gate)
@@ -300,6 +301,15 @@ public sealed class LedDispatchService
 
     private QueueEstimate GetEstimate(ushort address) =>
         _estimates.TryGetValue(address, out var estimate) ? estimate : new QueueEstimate();
+
+    private int BroadcastWithShadow(DownlinkCommand command, TargetSpec target)
+    {
+        lock (_sendGate)
+        {
+            var outgoing = command with { ShadowRecipients = target.Balloons.Select(balloon => balloon.MeshAddress).ToArray() };
+            return _gateways.Broadcast(outgoing);
+        }
+    }
 
     private void InsertPending(PendingReservation reservation)
     {
