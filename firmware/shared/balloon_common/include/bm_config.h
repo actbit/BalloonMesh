@@ -21,7 +21,7 @@
 
 /* Two broadcast groups by receiver role; individual nodes use unicast addresses.
  * Each model subscribes to only one of them (well under the library's
- * CONFIG_BLE_MESH_MODEL_GROUP_COUNT limit of 3). */
+ * CONFIG_BLE_MESH_MODEL_GROUP_COUNT limit of 32). */
 #define BM_GROUP_BALLOON 0xC010u /* balloon-facing: LED, time, neighbour probe */
 #define BM_GROUP_GATEWAY 0xC011u /* gateway-facing: FTM/neighbour/queue reports */
 
