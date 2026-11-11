@@ -16,6 +16,7 @@ public sealed class LedDispatchService
     private const int HardQueueDepth = 512;
 
     private readonly object _gate = new();
+    private readonly object _sendGate = new();
     private readonly List<PendingReservation> _pending = [];
     private readonly Dictionary<ushort, QueueEstimate> _estimates = [];
     private readonly Dictionary<ushort, ulong> _lastIssued = [];
@@ -26,6 +27,7 @@ public sealed class LedDispatchService
     private readonly IMonitorEvents _notifier;
     private readonly TimeProvider _time;
     private readonly ILogger<LedDispatchService> _logger;
+    private long _expiredEffectReservations;
 
     public LedDispatchService(
         GatewayRegistry gateways,
@@ -54,8 +56,18 @@ public sealed class LedDispatchService
         }
     }
 
+    public long ExpiredEffectReservations
+    {
+        get { lock (_gate) return _expiredEffectReservations; }
+    }
+
+    public void NoteExpiredEffectReservation()
+    {
+        lock (_gate) _expiredEffectReservations++;
+    }
+
     public bool EnqueueScheduled(TargetSpec target, ulong executeTick, DateTimeOffset executeAt,
-        byte r, byte g, byte b, long? showStepId = null)
+        byte r, byte g, byte b, long? showStepId = null, bool isEffect = false)
     {
         var nowTick = BalloonProtocol.NowTick40(_time);
         if (executeTick <= nowTick)
@@ -65,15 +77,14 @@ public sealed class LedDispatchService
 
         lock (_gate)
         {
-            _pending.Add(new PendingReservation(
+            InsertPending(new PendingReservation(
                 target,
                 BalloonProtocol.OpLedSet,
                 BalloonProtocol.EncodeLedSet(executeTick, r, g, b),
                 executeTick,
                 executeAt,
                 r, g, b,
-                showStepId));
-            _pending.Sort((left, right) => left.ExecuteAt.CompareTo(right.ExecuteAt));
+                showStepId, isEffect));
         }
         return true;
     }
@@ -81,7 +92,7 @@ public sealed class LedDispatchService
     public int SendImmediate(TargetSpec target, byte opcode, byte[] payload)
     {
         var command = new DownlinkCommand(target.Destination, BalloonProtocol.VendorOpcode(opcode), payload, 7);
-        return _gateways.Broadcast(command);
+        return BroadcastWithShadow(command, target);
     }
 
     public ulong NextIssuedTick(IEnumerable<ushort> addresses)
@@ -180,6 +191,7 @@ public sealed class LedDispatchService
 
         lock (_gate)
         {
+            var selectedCounts = new Dictionary<ushort, int>();
             foreach (var address in _estimates.Keys.ToArray())
             {
                 var estimate = GetEstimate(address);
@@ -201,9 +213,13 @@ public sealed class LedDispatchService
                     continue;
                 }
 
-                if (addresses.All(address => GetEstimate(address).EffectiveCount(nowTick) < TargetQueueDepth))
+                if (addresses.All(address => GetEstimate(address).EffectiveCount(nowTick) + selectedCounts.GetValueOrDefault(address) < TargetQueueDepth))
                 {
                     sendList.Add(item);
+                    foreach (var address in addresses)
+                    {
+                        selectedCounts[address] = selectedCounts.GetValueOrDefault(address) + 1;
+                    }
                 }
             }
 
@@ -214,6 +230,7 @@ public sealed class LedDispatchService
             foreach (var item in expired)
             {
                 _pending.Remove(item);
+                if (item.IsEffect) _expiredEffectReservations++;
             }
         }
 
@@ -223,8 +240,11 @@ public sealed class LedDispatchService
             {
                 _store.UpdateShowStepStatus(showStepId, "expired");
             }
-            _logger.LogWarning("reservation for {Target} at {ExecuteAt:O} expired before a gateway was available",
-                item.Target.Description, item.ExecuteAt);
+        }
+        if (expired.Count > 0)
+        {
+            _logger.LogWarning("{Count} reservation(s) expired before reaching a gateway; earliest execution time {ExecuteAt:O}",
+                expired.Count, expired.Min(item => item.ExecuteAt));
         }
 
         foreach (var item in sendList)
@@ -234,13 +254,12 @@ public sealed class LedDispatchService
                 BalloonProtocol.VendorOpcode(item.Opcode),
                 item.Payload,
                 7);
-            var gateways = _gateways.Broadcast(command);
+            var gateways = BroadcastWithShadow(command, item.Target);
             if (gateways == 0)
             {
                 lock (_gate)
                 {
-                    _pending.Add(item);
-                    _pending.Sort((left, right) => left.ExecuteAt.CompareTo(right.ExecuteAt));
+                    InsertPending(item);
                 }
                 continue;
             }
@@ -283,6 +302,22 @@ public sealed class LedDispatchService
     private QueueEstimate GetEstimate(ushort address) =>
         _estimates.TryGetValue(address, out var estimate) ? estimate : new QueueEstimate();
 
+    private int BroadcastWithShadow(DownlinkCommand command, TargetSpec target)
+    {
+        lock (_sendGate)
+        {
+            var outgoing = command with { ShadowRecipients = target.Balloons.Select(balloon => balloon.MeshAddress).ToArray() };
+            return _gateways.Broadcast(outgoing);
+        }
+    }
+
+    private void InsertPending(PendingReservation reservation)
+    {
+        var index = _pending.Count;
+        while (index > 0 && _pending[index - 1].ExecuteAt > reservation.ExecuteAt) index--;
+        _pending.Insert(index, reservation);
+    }
+
     private void WriteEstimate(ushort address, QueueEstimate estimate)
     {
         _estimates[address] = estimate;
@@ -311,7 +346,8 @@ public sealed class LedDispatchService
         byte R,
         byte G,
         byte B,
-        long? ShowStepId);
+        long? ShowStepId,
+        bool IsEffect);
 }
 
 public sealed class LedDispatchWorker : BackgroundService

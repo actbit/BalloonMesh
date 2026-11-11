@@ -69,6 +69,10 @@ public sealed record GatewayDto(
 
 public sealed record GroupDto(int Id, string Name, ushort MeshGroupAddress, int BalloonCount);
 
+public sealed record LedShadowDto(ushort MeshAddress, bool Known, byte R, byte G, byte B,
+    int QueueCount, long RejectedCount);
+public sealed record LedShadowSnapshotDto(Guid InstanceId, long Revision, IReadOnlyList<LedShadowDto> Nodes);
+
 public sealed record StateDto(
     DateTimeOffset ServerTime,
     string Version,
@@ -76,7 +80,9 @@ public sealed record StateDto(
     IReadOnlyList<BalloonDto> Balloons,
     IReadOnlyList<AnchorDto> Anchors,
     IReadOnlyList<GatewayDto> Gateways,
-    IReadOnlyList<GroupDto> Groups);
+    IReadOnlyList<GroupDto> Groups,
+    EffectStateDto? Effect = null,
+    LedShadowSnapshotDto? LedShadow = null);
 
 public sealed record CommandResultDto(
     bool Accepted,
@@ -116,6 +122,54 @@ public sealed record LedResetRequest(
     byte G = 0,
     byte B = 0);
 
+/// <summary>
+/// Abstract light effect.  The server expands this into per-balloon LED
+/// commands, so the UI never has to describe individual layers.
+/// </summary>
+public sealed record EffectStartRequest(
+    string Kind,
+    string? Origin = null,
+    double? Speed = null,
+    double? Wavelength = null,
+    double? Width = null,
+    int? DirectionDeg = null,
+    byte R = 56,
+    byte G = 189,
+    byte B = 248,
+    byte R2 = 0,
+    byte G2 = 0,
+    byte B2 = 0,
+    double? DurationSeconds = null,
+    int? FrameIntervalMs = null,
+    bool ClearOnStop = false);
+
+public sealed record EffectStopRequest(bool Clear = false, bool AtCycleEnd = false);
+
+public sealed record EffectStateDto(
+    string Kind,
+    string Label,
+    bool Running,
+    string? OriginAddress,
+    string? OriginName,
+    double Speed,
+    double Wavelength,
+    double Width,
+    int DirectionDeg,
+    byte R,
+    byte G,
+    byte B,
+    byte R2,
+    byte G2,
+    byte B2,
+    int FrameIntervalMs,
+    double DurationSeconds,
+    DateTimeOffset StartedAt,
+    DateTimeOffset? EndsAt,
+    DateTimeOffset? StopAt = null,
+    string? NextKind = null,
+    DateTimeOffset? NextAt = null,
+    string? ScheduleWarning = null);
+
 public sealed record InitialPositionRequest(double Lat, double Lon);
 
 public sealed record CreateGroupRequest(string Name);
@@ -152,6 +206,8 @@ public sealed record GatewayCommandsRequest(IReadOnlyList<GatewayCommandDto> Com
 
 public sealed record DownlinkCommand(ushort Dst, uint Opcode, byte[] Payload, int Ttl)
 {
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlyList<ushort>? ShadowRecipients { get; init; }
     public GatewayCommandDto ToDto() => new(Dst, Opcode, Convert.ToHexString(Payload), Ttl);
 }
 

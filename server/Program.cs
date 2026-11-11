@@ -25,13 +25,17 @@ builder.Services.AddSingleton<NeighborStore>();
 builder.Services.AddSingleton<GatewayRegistry>();
 builder.Services.AddSingleton<MonitorNotifier>();
 builder.Services.AddSingleton<IMonitorEvents>(serviceProvider => serviceProvider.GetRequiredService<MonitorNotifier>());
+builder.Services.AddSingleton<LedShadowService>();
 builder.Services.AddSingleton<FtmAggregator>();
 builder.Services.AddSingleton<MeshReportRouter>();
 builder.Services.AddSingleton<LedDispatchService>();
 builder.Services.AddSingleton<CommandService>();
 builder.Services.AddSingleton<MockProvisioningService>();
 builder.Services.AddSingleton<SimulationService>();
+builder.Services.AddSingleton<EffectService>();
 builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<SimulationService>());
+builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<EffectService>());
+builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<LedShadowService>());
 builder.Services.AddHostedService<AggregationWorker>();
 builder.Services.AddHostedService<ShowRecoveryWorker>();
 builder.Services.AddHostedService<LedDispatchWorker>();
@@ -72,9 +76,10 @@ app.Map("/ws/gateway", async context =>
     using var socket = await context.WebSockets.AcceptWebSocketAsync();
     var registry = context.RequestServices.GetRequiredService<GatewayRegistry>();
     var router = context.RequestServices.GetRequiredService<MeshReportRouter>();
+    var shadow = context.RequestServices.GetRequiredService<LedShadowService>();
     var logger = context.RequestServices.GetRequiredService<ILoggerFactory>()
         .CreateLogger("GatewayWebSocket");
-    await GatewayWebSocket.HandleAsync(socket, context, registry, router, logger,
+    await GatewayWebSocket.HandleAsync(socket, context, registry, router, shadow, logger,
         GatewayAuth.ConfiguredToken(context.RequestServices.GetRequiredService<IConfiguration>()),
         context.RequestAborted);
 });
@@ -105,18 +110,39 @@ app.MapGet("/", (HttpContext context) =>
 {
     var user = AuthenticatedUser.From(context.User);
     return Svelte.View(
-        "Home",
+        "Effects",
         new HomePageModel(
             "Balloon Mesh",
             ServerInfo.Version,
-            "ESP32-C3 RGB balloon fleet — live 2D map, FTM positioning and LED scheduling",
+            "Abstract light effects — flow from a node, waves and pulses",
             user.Name,
             user.Provider,
             user.Avatar,
             user.CanOperate,
             user.CanAdmin),
         SvelteRenderMode.Client,
-        new PageMetadata("Balloon Mesh", new Dictionary<string, string>
+        new PageMetadata("Balloon Mesh — Effects", new Dictionary<string, string>
+        {
+            ["viewport"] = "width=device-width, initial-scale=1"
+        }));
+}).RequireAuthorization(AuthRoles.Viewer);
+
+app.MapGet("/control", (HttpContext context) =>
+{
+    var user = AuthenticatedUser.From(context.User);
+    return Svelte.View(
+        "Home",
+        new HomePageModel(
+            "Balloon Mesh",
+            ServerInfo.Version,
+            "Detailed control — live 2D map, FTM positioning and LED scheduling",
+            user.Name,
+            user.Provider,
+            user.Avatar,
+            user.CanOperate,
+            user.CanAdmin),
+        SvelteRenderMode.Client,
+        new PageMetadata("Balloon Mesh — Detailed control", new Dictionary<string, string>
         {
             ["viewport"] = "width=device-width, initial-scale=1"
         }));
@@ -135,8 +161,10 @@ app.MapGet("/api/health", () => Results.Ok(new
     time = DateTimeOffset.UtcNow
 })).AllowAnonymous();
 
-app.MapGet("/api/state", (FleetService fleet, GatewayRegistry gateways, SimulationService simulation) =>
-    Results.Ok(fleet.GetState(gateways.Snapshot(), simulation.Running, ServerInfo.Version)))
+app.MapGet("/api/state", (FleetService fleet, GatewayRegistry gateways,
+    SimulationService simulation, EffectService effects, LedShadowService shadow) =>
+    Results.Ok(fleet.GetState(gateways.Snapshot(), simulation.Running, ServerInfo.Version,
+        effects.Current, shadow.Capture())))
     .RequireAuthorization(AuthRoles.Viewer);
 
 app.MapGet("/api/balloons", (FleetService fleet) => Results.Ok(fleet.GetBalloons()))
@@ -280,6 +308,36 @@ app.MapPost("/api/commands/reset", async (LedResetRequest request, CommandServic
     }
 }).RequireAuthorization(AuthRoles.Operator);
 
+app.MapGet("/api/effects", (EffectService effects) => Results.Ok(effects.Current))
+    .RequireAuthorization(AuthRoles.Viewer);
+
+app.MapPost("/api/effects/start", async (EffectStartRequest request, EffectService effects,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await effects.StartAsync(request, cancellationToken));
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+}).RequireAuthorization(AuthRoles.Operator);
+
+app.MapPost("/api/effects/stop", async (EffectStopRequest request, EffectService effects,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var state = await effects.StopAtCycleEndAsync(cancellationToken);
+        return state is null ? Results.NoContent() : Results.Ok(state);
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+}).RequireAuthorization(AuthRoles.Operator);
+
 app.MapPost("/api/demo/start", async (SimulationService simulation, CancellationToken cancellationToken) =>
 {
     await simulation.SetRunningAsync(true, cancellationToken);
@@ -319,7 +377,7 @@ app.MapPost("/api/gateway/{id}/events",
     });
 
 app.MapGet("/api/gateway/{id}/commands",
-    async (HttpContext http, string id, int? waitMs, GatewayRegistry registry,
+    async (HttpContext http, string id, int? waitMs, GatewayRegistry registry, LedShadowService shadow,
         IConfiguration configuration, CancellationToken cancellationToken) =>
     {
         if (!GatewayAuth.IsAuthorized(http, configuration))
@@ -334,9 +392,11 @@ app.MapGet("/api/gateway/{id}/commands",
             return Results.NoContent();
         }
 
+        shadow.ObserveDelivered(first);
         var commands = new List<GatewayCommandDto> { first.ToDto() };
         while (commands.Count < 32 && registry.TryReadCommand(id, out var next) && next is not null)
         {
+            shadow.ObserveDelivered(next);
             commands.Add(next.ToDto());
         }
         return Results.Ok(new GatewayCommandsRequest(commands));

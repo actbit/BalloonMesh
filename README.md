@@ -22,9 +22,11 @@ server/                         ASP.NET Core
   Auth/                         Cookie + OIDC / Discord + role policies
   Protocol/                     Protocol B codec
   Data/                         PostgreSQL (Npgsql)
-  Services/                     FTM 集約 / 測位 / LED 配信 / Gateway / シミュレーション
+  Services/                     FTM 集約 / 測位 / LED 配信 / エフェクト / Gateway / シミュレーション
   Hubs/                         SignalR
-  Views/Home.svelte             SvelteSharp Client モードの UI
+  Views/Effects.svelte          既定画面: 抽象エフェクト・コンポーザー
+  Views/Home.svelte             詳細設定: 地図・LED 予約・Gateway 状態
+  Views/lib/                    effect-model / fleet-map の .svelte.ts モジュール
   Views/Login.svelte            ログイン画面
 
 third_party/SvelteSharp/        git submodule (actbit/SvelteSharp, commit pinned)
@@ -74,12 +76,13 @@ $env:ConnectionStrings__BalloonMesh = "Host=127.0.0.1;Port=5432;Database=balloon
 dotnet run --project server/BalloonMesh.Server.csproj --urls http://0.0.0.0:5080
 ```
 
-- Web UI: <http://localhost:5080/>
+- Web UI（既定）: <http://localhost:5080/> — 抽象エフェクト・コンポーザー
+- 詳細設定: <http://localhost:5080/control> — 地図・LED 予約・Gateway 状態
 - SignalR: `/hubs/monitor`
 - Gateway WebSocket: `/ws/gateway`
 - Gateway HTTP: `POST /api/gateway/{id}/events`, `GET /api/gateway/{id}/commands?waitMs=10000`
 
-デモシミュレーションは既定で有効です。UI 右上の **Demo running / Start demo** で切り替えられます。無効化する場合:
+デモシミュレーションは既定で有効です。詳細設定画面の右上 **Demo running / Start demo** で切り替えられます。無効化する場合:
 
 ```powershell
 $env:Simulation__Enabled = "false"
@@ -270,10 +273,36 @@ pio run -t upload
 - Gateway 共有トークン認証（`Gateway:Token` / `X-Gateway-Token`）
 - UI の Gateway 状態（prov/unprov、spool 件数、transport）
 
+### 抽象エフェクト
+
+既定画面（`/`）は、レイヤーやノードごとの色指定ではなく「光の動き」を選ぶコンポーザーです。
+
+- `flow`: 選んだノードを起点に、光の帯が外へ流れる
+- `wave`: 指定した角度へ面状の波が流れる
+- `pulse`: 全ノードが同期して明滅する
+- `rainbow`: 色相がノード間を流れる
+- `twinkle`: ノードごとに異なるタイミングで明滅する
+- `alternate`: アドレスの偶数・奇数の2組が交互に明滅する
+- `solid`: 選んだ色ですべてのノードを点灯する
+
+`EffectService` は約30秒先の色をフレームごとに計算し、既存の時刻指定 `LED_SET` として段階的に配信します。全ノードが同じ色の場合はグループ宛ての1命令にまとめます。開始直後は約30秒の準備時間があります。各ノードで時計が同期している必要があります。ファームウェアに新しいオペコードは不要です。ブラウザ側のプレビューは `Views/lib/effect-model.svelte.ts`、実機配信は `Services/EffectService.cs` が同じ式で計算します。
+
+- `GET /api/effects` — 現在のエフェクト状態
+- `POST /api/effects/start` — 抽象エフェクトを開始（Operator 以上）。実行中の変更は次の周期から反映
+- `POST /api/effects/stop` — 次の周期の終わりに消灯し、配信を終了（途中での強制停止は行わない）
+- SignalR `effectChanged` — 開始・変更予約・終了予約・終了を全クライアントへ通知。終了予約中は `stopAt`、変更予約中は `nextKind` と `nextAt` が入る
+
+画面では繰り返し点灯が既定です。各周期の終わりに全ノード向けの消灯を予約し、40ms後に次の周期を予約します。色や動きの変更と送信終了は、予約済みの命令を取り消さず、その後の周期の区切りに反映します。周期は0.2秒以上です。30秒の先行時間は通信遅延を吸収する目安であり、配送を保証するものではありません。ノード数や再送・中継を含むMeshの処理能力は実機で測定してください。
+
+ゲートウェイへ渡す前に予約が期限切れになった場合、画面に警告を表示します。ゲートウェイへの投入後に発生したMesh送信失敗やノードへの未到達は、この警告では検出できません。
+
+地図の「送信命令からの予測」は、ゲートウェイに引き渡した命令をサーバー上の仮想キューでも消費して表示します。実機の時計が同期しており命令が届いたと仮定した予測であり、受信確認ではありません。ゲートウェイ未接続時は仮想キューも進みません。仮想キューはメモリー上にあり、サーバー再起動後は実機状態が不明になります。
+
 ### SvelteSharp Client モード
 
-- `server/Views/Home.svelte` をビルド時に Svelte 5 コンパイラでクライアント graph に変換
-- 実行時に `Svelte.View("Home", model, SvelteRenderMode.Client, ...)`
+- `server/Views/Effects.svelte`（既定）と `Home.svelte`（詳細設定）をビルド時に Svelte 5 クライアント graph に変換
+- 実行時に `Svelte.View("Effects" | "Home", model, SvelteRenderMode.Client, ...)`
+- 再利用ロジックは `Views/lib/*.svelte.ts` に分離。UI 部品は Svelte 5 snippet でコンポーネント化
 - Node.js / npm / Vite はアプリ実行時に不要（SvelteSharp のツールチェーン復元のみ初回ビルドで使用）
 - MapLibre と SignalR はブラウザで CDN から遅延ロード
 

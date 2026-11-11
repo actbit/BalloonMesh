@@ -164,10 +164,14 @@ Arduino を維持する場合の推奨確認手順:
 - Cookie + OIDC / Discord 認証
 - Viewer / Operator / Admin のロールポリシー
 - Admin 専用 MOCK オンボーディング UI / API / SignalR
+- 抽象エフェクト（flow / wave / pulse / rainbow）を既定画面にするコンポーザー
+  - サーバ側の `EffectService` が毎フレーム色を計算し、既存の `LED_SET_NOW` をユニキャスト送信
+  - ファームウェアに `LED_EFFECT_NOW` / `LED_FLOW_NOW` を追加せず、既存オペコードだけで表現
+  - `GET /api/effects`、`POST /api/effects/start`、`POST /api/effects/stop`、SignalR `effectChanged`
+  - ブラウザは同じ式でローカルプレビューし、詳細設定は `/control` に残す
 
 ## 14. 未実装 / 今後の課題
 
-- `LED_EFFECT_NOW` / `LED_FLOW_NOW`
 - Mesh Relay の選択的 ON/OFF、LPN/Friend 構成
 - BLE Mesh Provisioner 実装 / 鍵配布 / model bind / group subscribe の自動化
 - Protocol C の ACK・再送・TLS 証明書検証

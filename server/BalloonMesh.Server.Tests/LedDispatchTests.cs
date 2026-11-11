@@ -9,6 +9,48 @@ namespace BalloonMesh.Server.Tests;
 public sealed class LedDispatchTests
 {
     [Fact]
+    public async Task FullGatewayQueueKeepsReservationUntilCapacityReturns()
+    {
+        using var database = new TemporaryDatabase();
+        var fleet = new FleetService(database.Store);
+        var events = new RecordingMonitorEvents();
+        var time = new TestTimeProvider(new DateTimeOffset(2026, 11, 8, 10, 0, 0, TimeSpan.Zero));
+        var registry = new GatewayRegistry(events);
+        registry.GetOrRegister("gw-test");
+        var filler = new DownlinkCommand(1, 1, [1], 7);
+        for (var i = 0; i < 2048; i++) Assert.Equal(1, registry.Broadcast(filler));
+        var dispatch = new LedDispatchService(registry, fleet, database.Store, events, time, NullLogger<LedDispatchService>.Instance);
+        var at = time.GetUtcNow().AddSeconds(30);
+        Assert.True(dispatch.EnqueueScheduled(fleet.ResolveTarget("balloon", "0x0101"), BalloonProtocol.Tick40FromUnixMs(at.ToUnixTimeMilliseconds()), at, 1, 2, 3));
+        Assert.Equal(0, await dispatch.TickAsync());
+        Assert.Equal(1, dispatch.PendingCount);
+        Assert.True(registry.TryReadCommand("gw-test", out _));
+        Assert.Equal(1, await dispatch.TickAsync());
+        Assert.Equal(0, dispatch.PendingCount);
+    }
+
+    [Fact]
+    public async Task ScheduledBatchRespectsPerNodeReservationCapacity()
+    {
+        using var database = new TemporaryDatabase();
+        var fleet = new FleetService(database.Store);
+        var events = new RecordingMonitorEvents();
+        var time = new TestTimeProvider(new DateTimeOffset(2026, 11, 8, 10, 0, 0, TimeSpan.Zero));
+        var registry = new GatewayRegistry(events);
+        registry.GetOrRegister("gw-test");
+        var dispatch = new LedDispatchService(registry, fleet, database.Store, events, time, NullLogger<LedDispatchService>.Instance);
+        var target = fleet.ResolveTarget("balloon", "0x0101");
+        for (var i = 1; i <= 351; i++)
+        {
+            var at = time.GetUtcNow().AddSeconds(30).AddMilliseconds(i * 10);
+            Assert.True(dispatch.EnqueueScheduled(target, BalloonProtocol.Tick40FromUnixMs(at.ToUnixTimeMilliseconds()), at, 1, 2, 3));
+        }
+        Assert.Equal(350, await dispatch.TickAsync());
+        Assert.Equal(1, dispatch.PendingCount);
+        Assert.Equal(0, await dispatch.TickAsync());
+    }
+
+    [Fact]
     public async Task ScheduledReservationWaitsForAGateway()
     {
         using var database = new TemporaryDatabase();

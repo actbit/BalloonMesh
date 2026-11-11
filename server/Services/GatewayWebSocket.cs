@@ -14,6 +14,7 @@ public static class GatewayWebSocket
         HttpContext context,
         GatewayRegistry registry,
         MeshReportRouter router,
+        LedShadowService shadow,
         ILogger logger,
         string? expectedToken,
         CancellationToken cancellationToken)
@@ -71,7 +72,7 @@ public static class GatewayWebSocket
             }
 
             var client = registry.GetOrRegister(gatewayId);
-            var writer = WriteCommandsAsync(socket, client, linked.Token, logger);
+            var writer = WriteCommandsAsync(socket, client, shadow, linked.Token, logger);
             try
             {
                 while (socket.State == WebSocketState.Open && !linked.IsCancellationRequested)
@@ -144,6 +145,7 @@ public static class GatewayWebSocket
     private static async Task WriteCommandsAsync(
         WebSocket socket,
         GatewayClient client,
+        LedShadowService shadow,
         CancellationToken cancellationToken,
         ILogger logger)
     {
@@ -162,6 +164,7 @@ public static class GatewayWebSocket
                 };
                 var json = JsonSerializer.SerializeToUtf8Bytes(body, Json);
                 await socket.SendAsync(json, WebSocketMessageType.Text, true, cancellationToken);
+                shadow.ObserveDelivered(command);
             }
         }
         catch (OperationCanceledException)

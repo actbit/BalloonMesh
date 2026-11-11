@@ -7,6 +7,19 @@ namespace BalloonMesh.Server.Tests;
 public sealed class GatewayRegistryTests
 {
     [Fact]
+    public async Task FullGatewayQueueRetainsOlderCommands()
+    {
+        var registry = new GatewayRegistry(new RecordingMonitorEvents());
+        registry.GetOrRegister("gw-test");
+        var first = new DownlinkCommand(1, 1, [1], 7);
+        for (var i = 0; i < 2048; i++) Assert.Equal(1, registry.Broadcast(first));
+        var second = registry.GetOrRegister("gw-second");
+        Assert.Equal(0, registry.Broadcast(new DownlinkCommand(2, 1, [2], 7)));
+        Assert.Equal(0, second.PendingCommands);
+        Assert.Equal(first, await registry.ReadCommandAsync("gw-test", 0, default));
+    }
+
+    [Fact]
     public async Task BroadcastQueuesACommandForAConnectedGateway()
     {
         var registry = new GatewayRegistry(new RecordingMonitorEvents());
