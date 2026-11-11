@@ -8,15 +8,18 @@
 #include "bm_led_output.h"
 #include "balloon_mesh.h"
 #include "balloon_neighbor_link.h"
-#include "balloon_positioning.h"
 #include "balloon_time_link.h"
 #include "bm_config.h"
+#if BM_ENABLE_POSITIONING
+#include "balloon_positioning.h"
+#endif
 
 static const char *TAG = "balloon";
 
 void setup() {
     Serial.begin(115200);
     delay(200);
+    esp_log_level_set("*", ESP_LOG_INFO);
     ESP_LOGI(TAG, "BalloonMesh balloon firmware %s", BM_FIRMWARE_VERSION);
 
     esp_err_t err = nvs_flash_init();
@@ -32,7 +35,11 @@ void setup() {
     bm_neighbor_link_init();
     bm_time_link_init();
     bm_balloon_mesh_init();
+#if BM_ENABLE_POSITIONING
     bm_positioning_start();
+#else
+    ESP_LOGI(TAG, "positioning disabled (BLE Mesh bring-up mode)");
+#endif
 }
 
 void loop() {

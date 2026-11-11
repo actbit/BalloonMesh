@@ -5,6 +5,12 @@
 
 #define BM_FIRMWARE_VERSION "0.1.0"
 
+/* Normal balloon firmware includes Protocol A / FTM positioning.  The
+ * BLE-Mesh-only bring-up profile overrides this at build time. */
+#ifndef BM_ENABLE_POSITIONING
+#define BM_ENABLE_POSITIONING 1
+#endif
+
 /* Bluetooth Mesh addressing.  Production deployments should provision these
  * values rather than compiling them in. */
 #define BM_COMPANY_ID_LOCAL 0x02E5u

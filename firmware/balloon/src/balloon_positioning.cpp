@@ -213,6 +213,7 @@ void bm_positioning_start(void) {
     s_ftm_done = xSemaphoreCreateBinary();
     WiFi.persistent(false);
     WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);
+    /* BLE and Wi-Fi coexistence requires Wi-Fi modem sleep on ESP32-C3. */
+    WiFi.setSleep(true);
     xTaskCreate(positioning_task, "positioning", 8192, NULL, 4, NULL);
 }

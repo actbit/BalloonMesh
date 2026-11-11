@@ -11,6 +11,10 @@ obj/
 .pio/
 firmware/.pio/
 
+# ESP-IDF generated configuration (keep sdkconfig.defaults)
+firmware/*/sdkconfig.*
+!firmware/*/sdkconfig.defaults
+
 # SvelteSharp restored toolchain and generated artifacts
 server/tools/svelte/
 third_party/SvelteSharp/tools/svelte/
