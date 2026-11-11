@@ -161,7 +161,9 @@ public sealed record EffectStateDto(
     DateTimeOffset StartedAt,
     DateTimeOffset? EndsAt,
     DateTimeOffset? StopAt = null,
-    string? NextKind = null);
+    string? NextKind = null,
+    DateTimeOffset? NextAt = null,
+    string? ScheduleWarning = null);
 
 public sealed record InitialPositionRequest(double Lat, double Lon);
 

@@ -62,6 +62,8 @@
     endsAt: string | null;
     stopAt: string | null;
     nextKind: string | null;
+    nextAt: string | null;
+    scheduleWarning: string | null;
   };
 
   type Balloon = MapBalloon & {
@@ -131,6 +133,12 @@
     if (effect.stopAt) {
       return `あと約${Math.max(0, Math.ceil((Date.parse(effect.stopAt) - clock) / 1000))}秒`;
     }
+    if (effect.nextAt) {
+      return `変更まで約${Math.max(0, Math.ceil((Date.parse(effect.nextAt) - clock) / 1000))}秒`;
+    }
+    if (clock < Date.parse(effect.startedAt)) {
+      return `開始まで約${Math.ceil((Date.parse(effect.startedAt) - clock) / 1000)}秒`;
+    }
     if (effect.durationSeconds <= 0 || !effect.endsAt) {
       return '連続';
     }
@@ -140,6 +148,9 @@
   const progress = $derived.by(() => {
     if (!effect?.running) {
       return 0;
+    }
+    if (clock < Date.parse(effect.startedAt)) {
+      return Math.max(0, Math.min(100, (1 - (Date.parse(effect.startedAt) - clock) / 30000) * 100));
     }
     if (!effect || effect.durationSeconds <= 0 || !effect.endsAt) {
       return effect?.running ? 100 : 0;
@@ -276,7 +287,7 @@
       });
       effect = state as EffectState;
       effectStartedMs = Date.parse(effect.startedAt);
-      addLog(effect.nextKind ? '次の周から設定を変更します' : `${effect.label} を開始`);
+      addLog(effect.nextKind ? '予約済みの周が終わってから設定を変更します' : '約30秒後の開始に向けて命令を準備します');
     } catch (error) {
       addLog(`エフェクト開始に失敗: ${(error as Error).message}`);
     } finally {
@@ -295,7 +306,7 @@
         body: JSON.stringify({ atCycleEnd: true })
       });
       effect = state ?? (effect ? { ...effect, running: false } : null);
-      addLog('次の1周の終わりに消灯して停止します');
+      addLog('予約済みの周が終わったら送信を終了します');
     } catch (error) {
       addLog(`停止に失敗: ${(error as Error).message}`);
     } finally {
@@ -369,7 +380,7 @@
       effect = value;
       if (value?.running) {
         effectStartedMs = Date.parse(value.startedAt);
-        addLog(value.stopAt ? '次の1周の終わりに送信を終了します' : value.nextKind ? '次の周から設定を変更します' : `${value.label} を開始`);
+        addLog(value.scheduleWarning ?? (value.stopAt ? '予約済みの周が終わったら送信を終了します' : value.nextKind ? '予約済みの周が終わったら設定を変更します' : `${value.label} の予約を開始`));
       } else if (value) {
         previewSeconds = 0;
         addLog(`${value.label} を停止`);
@@ -494,7 +505,7 @@
           <h2>どんな光にしますか？</h2>
         </div>
         <span class="state-pill" class:live={effect?.running}>
-          {effect?.stopAt ? '終了待ち' : effect?.nextKind ? '変更待ち' : effect?.running ? '点灯中' : 'プレビュー中'}
+          {effect?.stopAt ? '終了待ち' : effect?.nextKind ? '変更待ち' : effect?.running && clock < Date.parse(effect.startedAt) ? '準備中' : effect?.running ? '送信中' : 'プレビュー中'}
         </span>
       </div>
 
@@ -572,23 +583,26 @@
       {:else}
         <p class="hint">地図は設定のプレビューです。開始するとライトは繰り返し点灯します。</p>
       {/if}
+      {#if effect?.scheduleWarning}
+        <p class="schedule-warning" role="alert">{effect.scheduleWarning}</p>
+      {/if}
       <div class="action-bar">
         <p class="step-label">3　地図で確認して開始</p>
         <div class="actions">
           <button class="primary" onclick={startEffect}
-                  disabled={!model.canOperate || busy || positionedCount === 0 || !!effect?.stopAt}>
-            {effect?.running ? '次の周からこの設定に変更' : 'ループを開始'}
+                  disabled={!model.canOperate || busy || positionedCount === 0 || !!effect?.stopAt || !!effect?.nextKind}>
+            {effect?.running ? '予約後にこの設定へ変更' : '30秒後の開始を予約'}
           </button>
           {#if effect?.running}
-            <button onclick={stopEffect} disabled={busy || !!effect.stopAt}>
-              {effect.stopAt ? '終了待ち' : '周の終わりで送信を終了'}
+            <button onclick={stopEffect} disabled={busy || !!effect.stopAt || !!effect.nextKind}>
+              {effect.stopAt ? '終了待ち' : '予約後に送信を終了'}
             </button>
           {/if}
         </div>
         {#if effect?.stopAt}
-          <p class="hint">周の終わりに消灯して送信を終了します。次の設定は今から準備できます。</p>
+          <p class="hint">予約済みの周が終わると消灯し、送信を終了します。</p>
         {:else if effect?.running}
-          <p class="hint">色や動きを変更したら、次の周から反映できます。送信終了を選ぶと変更予約は取り消されます。</p>
+          <p class="hint">約30秒先まで予約します。変更や終了は、予約済みの周が終わってから反映されます。</p>
         {/if}
       </div>
     </section>
@@ -598,7 +612,7 @@
         <div class="panel-head compact">
           <div>
             <p class="eyebrow">ライトの状態</p>
-            <h2>{effect?.stopAt ? '周の終わりで終了' : effect?.nextKind ? '次の周から変更' : effect?.running ? 'ループ中' : '待機中'}</h2>
+            <h2>{effect?.stopAt ? '予約後に終了' : effect?.nextKind ? '予約後に変更' : effect?.running && clock < Date.parse(effect.startedAt) ? '開始準備中' : effect?.running ? 'ループ送信中' : '待機中'}</h2>
           </div>
           <span class="live-dot" class:on={effect?.running}></span>
         </div>
@@ -920,6 +934,7 @@
   button:disabled:hover { border-color: rgba(148, 163, 184, 0.25); background: rgba(15, 23, 42, 0.75); }
 
   .hint { margin: 10px 0 0; font-size: 10px; line-height: 1.5; color: #94a3b8; }
+  .schedule-warning { margin: 10px 0; color: #fca5a5; font-size: 12px; line-height: 1.5; }
 
   .live-panel, .fleet-panel, .log-panel { flex: 0 0 auto; }
   .live-dot {

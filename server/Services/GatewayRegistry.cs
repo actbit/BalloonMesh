@@ -13,7 +13,7 @@ public sealed class GatewayClient
         Id = id;
         Commands = Channel.CreateBounded<DownlinkCommand>(new BoundedChannelOptions(2048)
         {
-            FullMode = BoundedChannelFullMode.DropOldest,
+            FullMode = BoundedChannelFullMode.Wait,
             SingleReader = false,
             SingleWriter = false
         });
@@ -36,8 +36,10 @@ public sealed class GatewayClient
 /// </summary>
 public sealed class GatewayRegistry
 {
+    private const int GatewayQueueCapacity = 2048;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private readonly ConcurrentDictionary<string, GatewayClient> _clients = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _broadcastGate = new();
     private readonly IMonitorEvents _notifier;
 
     public GatewayRegistry(IMonitorEvents notifier)
@@ -88,15 +90,16 @@ public sealed class GatewayRegistry
 
     public int Broadcast(DownlinkCommand command)
     {
-        var count = 0;
-        foreach (var client in _clients.Values)
+        lock (_broadcastGate)
         {
-            if (client.Commands.Writer.TryWrite(command))
+            var cutoff = DateTimeOffset.UtcNow.AddSeconds(-30);
+            var clients = _clients.Values.Where(client => client.WebSocketConnected || client.LastSeen >= cutoff).ToArray();
+            if (clients.Any(client => client.PendingCommands >= GatewayQueueCapacity))
             {
-                count++;
+                return 0;
             }
+            return clients.Count(client => client.Commands.Writer.TryWrite(command));
         }
-        return count;
     }
 
     public bool TryReadCommand(string id, out DownlinkCommand? command)

@@ -6,36 +6,37 @@ namespace BalloonMesh.Server.Services;
 
 /// <summary>
 /// Expands an abstract light effect into concrete per-balloon LED commands.
-/// The firmware only needs the existing LED_SET_NOW opcode: the server samples
-/// the effect at a fixed frame interval and streams the resulting colours.
+/// Schedules timestamped LED_SET commands ahead of execution.
 /// </summary>
 public sealed class EffectService : BackgroundService
 {
-    private const byte LedOpcode = BalloonProtocol.OpLedSetNow;
     private static readonly TimeSpan PumpInterval = TimeSpan.FromMilliseconds(40);
+    private static readonly TimeSpan LeadTime = TimeSpan.FromSeconds(30);
 
     private readonly FleetService _fleet;
     private readonly LedDispatchService _dispatch;
-    private readonly GatewayRegistry _gateways;
     private readonly IMonitorEvents _notifier;
     private readonly TimeProvider _time;
     private readonly ILogger<EffectService> _logger;
     private readonly object _gate = new();
     private EffectRun? _run;
     private EffectRun? _pendingRun;
+    private EffectRun? _scheduledRun;
+    private DateTimeOffset? _switchAt;
+    private bool _endScheduled;
+    private long _expiredBaseline;
+    private string? _scheduleWarning;
     private EffectStateDto? _last;
 
     public EffectService(
         FleetService fleet,
         LedDispatchService dispatch,
-        GatewayRegistry gateways,
         IMonitorEvents notifier,
         TimeProvider time,
         ILogger<EffectService> logger)
     {
         _fleet = fleet;
         _dispatch = dispatch;
-        _gateways = gateways;
         _notifier = notifier;
         _time = time;
         _logger = logger;
@@ -74,11 +75,15 @@ public sealed class EffectService : BackgroundService
 
         var defaults = DefaultsFor(kind);
         var speed = Math.Clamp(request.Speed ?? defaults.Speed, 0.5, 500);
-        var wavelength = Math.Clamp(request.Wavelength ?? defaults.Wavelength, 5, 5000);
+        var wavelength = Math.Clamp(request.Wavelength ?? defaults.Wavelength, kind == "pulse" ? 0.1 : 5, 5000);
         var width = Math.Clamp(request.Width ?? defaults.Width, 0.05, 1);
         var direction = NormalizeAngle(request.DirectionDeg ?? defaults.DirectionDeg);
         var frameInterval = Math.Clamp(request.FrameIntervalMs ?? 250, 100, 2000);
         var duration = Math.Clamp(request.DurationSeconds ?? 0, 0, 3600);
+        if (kind != "pulse" && wavelength / speed < 0.2)
+        {
+            throw new ArgumentException("The effect cycle must be at least 0.2 seconds.");
+        }
         var now = _time.GetUtcNow();
 
         var run = new EffectRun(
@@ -97,10 +102,9 @@ public sealed class EffectService : BackgroundService
             request.B2,
             frameInterval,
             duration,
-            request.ClearOnStop,
-            now)
+            now.Add(LeadTime))
         {
-            NextFrameAt = now
+            NextFrameAt = now.Add(LeadTime)
         };
 
         EffectStateDto state;
@@ -108,21 +112,25 @@ public sealed class EffectService : BackgroundService
         {
             if (_run is not null)
             {
-                if (_run.StopAt is not null)
+                if (_run.StopAt is not null || _scheduledRun is not null)
                 {
-                    throw new ArgumentException("The effect is stopping. Wait until it has stopped.");
+                    throw new ArgumentException("A change or stop is already scheduled. Wait for it to take effect.");
                 }
                 _pendingRun = run;
-                state = _run.ToState(running: true) with { NextKind = run.Kind };
+                _switchAt = NextBoundary(_run, _run.LastScheduledAt);
+                state = _run.ToState(running: true) with { NextKind = run.Kind, NextAt = _switchAt };
             }
             else
             {
                 _run = run;
+                _expiredBaseline = _dispatch.ExpiredEffectReservations;
+                _scheduleWarning = null;
                 state = run.ToState(running: true);
             }
+            state = state with { ScheduleWarning = _scheduleWarning };
             _last = state;
         }
-        _logger.LogInformation("effect {Kind} started (origin={Origin}, duration={Duration}s)",
+        _logger.LogInformation("effect {Kind} scheduled (origin={Origin}, duration={Duration}s)",
             kind, run.OriginAddress ?? "centroid", duration);
         await _notifier.EffectChangedAsync(state);
         return state;
@@ -139,53 +147,31 @@ public sealed class EffectService : BackgroundService
             }
 
             var run = _run;
+            if (_scheduledRun is not null)
+            {
+                throw new ArgumentException("A change is already scheduled. Wait for it to take effect before stopping.");
+            }
             _pendingRun = null;
+            _switchAt = null;
             if (run.StopAt is null)
             {
-                var period = run.PeriodSeconds;
-                var now = _time.GetUtcNow();
-                var elapsed = Math.Max(0, (now - run.StartedAt).TotalSeconds);
-                var cycles = Math.Floor(elapsed / period) + 1;
-                run.StopAt = run.StartedAt.AddSeconds(cycles * period);
+                run.StopAt = NextBoundary(run, run.LastScheduledAt);
                 if (run.EndsAt is { } endsAt && endsAt < run.StopAt)
                 {
                     run.StopAt = endsAt;
                 }
             }
-            state = run.ToState(running: true);
+            state = run.ToState(running: true) with { ScheduleWarning = _scheduleWarning };
             _last = state;
         }
         await _notifier.EffectChangedAsync(state);
         return state;
     }
 
-    private async Task<EffectStateDto?> StopAsync(bool clear, EffectRun? expectedRun)
+    private static DateTimeOffset NextBoundary(EffectRun run, DateTimeOffset? lastScheduled)
     {
-        EffectStateDto? state;
-        lock (_gate)
-        {
-            if (expectedRun is not null && !ReferenceEquals(_run, expectedRun))
-            {
-                return null;
-            }
-            _run = null;
-            _pendingRun = null;
-            state = _last is null ? null : _last with { Running = false, StopAt = null, NextKind = null };
-            _last = state;
-            if (state is not null && clear)
-            {
-                SendBlackFrame();
-            }
-        }
-
-        if (state is null)
-        {
-            return null;
-        }
-
-        _logger.LogInformation("effect {Kind} stopped", state.Kind);
-        await _notifier.EffectChangedAsync(state);
-        return state;
+        var elapsed = Math.Max(0, ((lastScheduled ?? run.StartedAt) - run.StartedAt).TotalSeconds);
+        return run.StartedAt.AddSeconds((Math.Floor(elapsed / run.PeriodSeconds + 1e-9) + 1) * run.PeriodSeconds);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -210,77 +196,78 @@ public sealed class EffectService : BackgroundService
 
     private async Task PumpAsync(CancellationToken cancellationToken)
     {
-        EffectRun? run;
-        DateTimeOffset? scheduledStop;
-        bool hasPending;
-        lock (_gate)
-        {
-            run = _run;
-            scheduledStop = run?.StopAt;
-            hasPending = _pendingRun is not null;
-        }
-        if (run is null)
-        {
-            return;
-        }
-
-        var now = _time.GetUtcNow();
-        if (scheduledStop is { } stopAt && now >= stopAt)
-        {
-            await StopAsync(clear: true, run);
-            return;
-        }
-        if (!hasPending && run.EndsAt is { } endsAt && now >= endsAt)
-        {
-            await StopAsync(clear: true, run);
-            return;
-        }
-
         EffectStateDto? changed = null;
+        var now = _time.GetUtcNow();
         lock (_gate)
         {
-            if (!ReferenceEquals(_run, run))
+            if (_run is null)
             {
                 return;
             }
-            var elapsed = Math.Max(0, (now - run.StartedAt).TotalSeconds);
-            var cycle = (long)Math.Floor(elapsed / run.PeriodSeconds);
-            if (run.InBlackout)
+
+            if (_scheduleWarning is null && _dispatch.ExpiredEffectReservations > _expiredBaseline)
             {
-                if (now >= run.NextFrameAt)
-                {
-                    run.InBlackout = false;
-                    run.LastCycle = cycle;
-                    run.NextFrameAt = now.AddMilliseconds(run.FrameIntervalMs);
-                    RenderFrame(run, now);
-                }
+                _scheduleWarning = "一部の予約が送信される前に期限切れになりました。ゲートウェイと通信状況を確認してください。";
+                changed = _last! with { ScheduleWarning = _scheduleWarning };
+                _last = changed;
             }
-            else if (cycle > run.LastCycle)
+
+            if (_scheduledRun is not null && _switchAt is { } switchAt && now >= switchAt)
             {
-                run.LastCycle = cycle;
-                SendBlackFrame();
-                run.LastColors.Clear();
-                run.NextFrameAt = now.Add(PumpInterval);
-                run.InBlackout = true;
-                if (_pendingRun is { } next)
-                {
-                    next.BeginAt(now, PumpInterval);
-                    _run = next;
-                    _pendingRun = null;
-                    changed = next.ToState(running: true);
-                    _last = changed;
-                }
+                _run = _scheduledRun;
+                _scheduledRun = null;
+                _switchAt = null;
+                changed = _run.ToState(running: true) with { ScheduleWarning = _scheduleWarning };
+                _last = changed;
             }
-            else if (now >= run.NextFrameAt)
+
+            if (_endScheduled && _run.StopAt is { } stopAt && now >= stopAt)
             {
-                run.NextFrameAt = now.AddMilliseconds(run.FrameIntervalMs);
-                RenderFrame(run, now);
+                changed = _run.ToState(running: false) with { ScheduleWarning = _scheduleWarning };
+                _last = changed;
+                _run = null;
+                _endScheduled = false;
+            }
+
+            for (var generated = 0; generated < 2; generated++)
+            {
+                var plan = _scheduledRun ?? _run;
+                if (plan is null || _endScheduled || plan.NextFrameAt > now.Add(LeadTime)) break;
+                var nextBoundary = plan.StartedAt.AddSeconds((plan.LastCycle + 1) * plan.PeriodSeconds);
+                if (plan.NextFrameAt >= nextBoundary)
+                {
+                    ScheduleBlackFrame(nextBoundary);
+                    plan.LastScheduledAt = nextBoundary;
+                    plan.LastCycle++;
+                    plan.LastColors.Clear();
+                    plan.NextFrameAt = nextBoundary.Add(PumpInterval);
+                    if (plan.StopAt is { } scheduledStop && nextBoundary >= scheduledStop ||
+                        plan.EndsAt is { } endsAt && nextBoundary >= endsAt && _pendingRun is null)
+                    {
+                        plan.StopAt = nextBoundary;
+                        _endScheduled = true;
+                        _last = plan.ToState(running: true) with { ScheduleWarning = _scheduleWarning };
+                    }
+                    else if (ReferenceEquals(plan, _run) && _pendingRun is { } next && _switchAt <= nextBoundary)
+                    {
+                        next.BeginAt(nextBoundary, PumpInterval);
+                        _scheduledRun = next;
+                        _pendingRun = null;
+                    }
+                }
+                else
+                {
+                    ScheduleFrame(plan, plan.NextFrameAt);
+                    plan.LastScheduledAt = plan.NextFrameAt;
+                    var nextFrame = plan.NextFrameAt.AddMilliseconds(plan.FrameIntervalMs);
+                    plan.NextFrameAt = nextFrame < nextBoundary ? nextFrame : nextBoundary;
+                }
             }
         }
         if (changed is not null) await _notifier.EffectChangedAsync(changed);
     }
 
-    private void RenderFrame(EffectRun run, DateTimeOffset now)
+    private void ScheduleFrame(EffectRun run, DateTimeOffset executeAt)
     {
         var positioned = _fleet.GetBalloons()
             .Where(balloon => balloon.Lat is not null && balloon.Lon is not null)
@@ -294,42 +281,54 @@ public sealed class EffectService : BackgroundService
         var (originLat, originLon) = run.OriginLat is { } oLat && run.OriginLon is { } oLon
             ? (oLat, oLon)
             : (centerLat, centerLon);
-        var elapsed = Math.Max(0, (now - run.StartedAt).TotalSeconds);
-        var addresses = positioned.Select(balloon => balloon.MeshAddress).ToArray();
-        var tick = _dispatch.NextIssuedTick(addresses);
-        var opcode = BalloonProtocol.VendorOpcode(LedOpcode);
-
-        foreach (var balloon in positioned)
+        var elapsed = Math.Max(0, (executeAt - run.StartedAt).TotalSeconds);
+        var tick = BalloonProtocol.Tick40FromUnixMs(executeAt.ToUnixTimeMilliseconds());
+        var allTarget = _fleet.ResolveTarget("all", "all");
+        var records = allTarget.Balloons.ToDictionary(balloon => balloon.MeshAddress);
+        var colours = positioned.Select(balloon => (Balloon: balloon, Colour: Evaluate(run, balloon, elapsed,
+            originLat, originLon, centerLat, centerLon))).ToArray();
+        if (colours.Length == records.Count && colours.All(item => records.ContainsKey(item.Balloon.MeshAddress)) &&
+            colours.All(item => item.Colour == colours[0].Colour))
         {
-            var (r, g, b) = Evaluate(run, balloon, elapsed,
-                originLat, originLon, centerLat, centerLon);
+            var colour = colours[0].Colour;
+            if (colours.All(item => run.LastColors.TryGetValue(item.Balloon.MeshAddress, out var old) && old == colour)) return;
+            if (_dispatch.EnqueueScheduled(allTarget, tick, executeAt, colour.R, colour.G, colour.B, isEffect: true))
+            {
+                foreach (var item in colours) run.LastColors[item.Balloon.MeshAddress] = colour;
+            }
+            else _dispatch.NoteExpiredEffectReservation();
+            return;
+        }
+
+        foreach (var item in colours)
+        {
+            var balloon = item.Balloon;
+            var (r, g, b) = item.Colour;
             if (run.LastColors.TryGetValue(balloon.MeshAddress, out var previous)
                 && previous == (r, g, b))
             {
                 continue;
             }
 
-            run.LastColors[balloon.MeshAddress] = (r, g, b);
-            var payload = BalloonProtocol.EncodeLedSetNow(tick, r, g, b);
-            _gateways.Broadcast(new DownlinkCommand(balloon.MeshAddress, opcode, payload, 7));
+            if (records.TryGetValue(balloon.MeshAddress, out var record) &&
+                _dispatch.EnqueueScheduled(new TargetSpec(balloon.MeshAddress, [record], balloon.Name),
+                    tick, executeAt, r, g, b, isEffect: true))
+            {
+                run.LastColors[balloon.MeshAddress] = (r, g, b);
+            }
+            else if (executeAt <= _time.GetUtcNow().AddMilliseconds(10))
+            {
+                _dispatch.NoteExpiredEffectReservation();
+            }
         }
     }
 
-    private void SendBlackFrame()
+    private void ScheduleBlackFrame(DateTimeOffset executeAt)
     {
-        var balloons = _fleet.GetBalloons();
-        if (balloons.Count == 0)
+        var tick = BalloonProtocol.Tick40FromUnixMs(executeAt.ToUnixTimeMilliseconds());
+        if (!_dispatch.EnqueueScheduled(_fleet.ResolveTarget("all", "all"), tick, executeAt, 0, 0, 0, isEffect: true))
         {
-            return;
-        }
-
-        var addresses = balloons.Select(balloon => balloon.MeshAddress).ToArray();
-        var tick = _dispatch.NextIssuedTick(addresses);
-        var payload = BalloonProtocol.EncodeLedSetNow(tick, 0, 0, 0);
-        var opcode = BalloonProtocol.VendorOpcode(LedOpcode);
-        foreach (var balloon in balloons)
-        {
-            _gateways.Broadcast(new DownlinkCommand(balloon.MeshAddress, opcode, payload, 7));
+            _dispatch.NoteExpiredEffectReservation();
         }
     }
 
@@ -520,7 +519,6 @@ public sealed class EffectService : BackgroundService
             byte b2,
             int frameIntervalMs,
             double durationSeconds,
-            bool clearOnStop,
             DateTimeOffset startedAt)
         {
             Kind = kind;
@@ -541,7 +539,6 @@ public sealed class EffectService : BackgroundService
             B2 = b2;
             FrameIntervalMs = frameIntervalMs;
             DurationSeconds = durationSeconds;
-            ClearOnStop = clearOnStop;
             StartedAt = startedAt;
             var period = Math.Max(kind == "pulse" ? 0.2 : 0, wavelength / speed);
             EndsAt = durationSeconds > 0 ? startedAt.AddSeconds(Math.Ceiling(durationSeconds / period) * period) : null;
@@ -565,13 +562,12 @@ public sealed class EffectService : BackgroundService
         public byte B2 { get; }
         public int FrameIntervalMs { get; }
         public double DurationSeconds { get; }
-        public bool ClearOnStop { get; }
         public DateTimeOffset StartedAt { get; private set; }
         public DateTimeOffset? EndsAt { get; private set; }
         public DateTimeOffset NextFrameAt { get; set; }
+        public DateTimeOffset? LastScheduledAt { get; set; }
         public double PeriodSeconds => Math.Max(Kind == "pulse" ? 0.2 : 0, Wavelength / Speed);
         public long LastCycle { get; set; }
-        public bool InBlackout { get; set; }
         public DateTimeOffset? StopAt { get; set; }
         public Dictionary<ushort, (byte R, byte G, byte B)> LastColors { get; } = [];
 
@@ -580,7 +576,7 @@ public sealed class EffectService : BackgroundService
             StartedAt = now;
             EndsAt = DurationSeconds > 0 ? now.AddSeconds(Math.Ceiling(DurationSeconds / PeriodSeconds) * PeriodSeconds) : null;
             NextFrameAt = now.Add(blackout);
-            InBlackout = true;
+            LastScheduledAt = now;
         }
 
         public EffectStateDto ToState(bool running) => new(

@@ -324,8 +324,15 @@ app.MapPost("/api/effects/start", async (EffectStartRequest request, EffectServi
 app.MapPost("/api/effects/stop", async (EffectStopRequest request, EffectService effects,
     CancellationToken cancellationToken) =>
 {
-    var state = await effects.StopAtCycleEndAsync(cancellationToken);
-    return state is null ? Results.NoContent() : Results.Ok(state);
+    try
+    {
+        var state = await effects.StopAtCycleEndAsync(cancellationToken);
+        return state is null ? Results.NoContent() : Results.Ok(state);
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
 }).RequireAuthorization(AuthRoles.Operator);
 
 app.MapPost("/api/demo/start", async (SimulationService simulation, CancellationToken cancellationToken) =>
