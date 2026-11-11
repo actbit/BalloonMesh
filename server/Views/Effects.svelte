@@ -211,8 +211,10 @@
     } else {
       effect = null;
     }
-    if (first && selectedOrigin == null && balloons.length > 0) {
-      selectedOrigin = balloons[0].meshAddress;
+    if (first && selectedOrigin == null) {
+      selectedOrigin = balloons.find(
+        (balloon) => balloon.lat != null && balloon.lon != null
+      )?.meshAddress ?? null;
     }
     fleetMap?.setBalloons(balloons, selectedOrigin);
     if (first) {
@@ -288,8 +290,7 @@
           g2: params.g2,
           b2: params.b2,
           durationSeconds: params.durationSeconds,
-          frameIntervalMs: params.frameIntervalMs,
-          clearOnStop: true
+          frameIntervalMs: params.frameIntervalMs
         })
       });
       effect = state as EffectState;
@@ -308,10 +309,7 @@
     }
     busy = true;
     try {
-      const state = await api('/api/effects/stop', {
-        method: 'POST',
-        body: JSON.stringify({ atCycleEnd: true })
-      });
+      const state = await api('/api/effects/stop', { method: 'POST' });
       effect = state ?? (effect ? { ...effect, running: false } : null);
       addLog('予約済みの周が終わったら送信を終了します');
     } catch (error) {
@@ -563,7 +561,7 @@
             <span>光が広がる起点</span>
             <select value={selectedOrigin ?? ''} onchange={(event) => selectOrigin(eventValue(event))}>
               <option value="">自動（重心）</option>
-              {#each balloons as balloon}
+              {#each balloons.filter((balloon) => balloon.lat != null && balloon.lon != null) as balloon}
                 <option value={balloon.meshAddress}>{balloon.name} · {formatAddress(balloon.meshAddress)}</option>
               {/each}
             </select>

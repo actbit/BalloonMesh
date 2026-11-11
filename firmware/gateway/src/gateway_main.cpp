@@ -116,10 +116,12 @@ static void upload_events_task(void *argument) {
                                BM_GATEWAY_ID, BM_FIRMWARE_VERSION,
                                bm_gateway_mesh_is_provisioned() ? "true" : "false",
                                (unsigned)bm_gateway_spool_count());
-        for (uint16_t i = 0; i < count; ++i) {
+        bool body_ok = written > 0 && (size_t)written < capacity;
+        for (uint16_t i = 0; body_ok && i < count; ++i) {
             char hex[17];
             hex_encode(events[i].payload, events[i].length, hex, sizeof(hex));
-            written += snprintf(body + written, capacity - (size_t)written,
+            size_t remaining = capacity - (size_t)written;
+            int appended = snprintf(body + written, remaining,
                                 "%s{\"src\":%u,\"dst\":%u,\"opcode\":%lu,"
                                 "\"payload\":\"%s\",\"rssi\":%d,\"ttl\":%u,"
                                 "\"receivedMs\":%lu}",
@@ -128,11 +130,25 @@ static void upload_events_task(void *argument) {
                                 (unsigned long)events[i].opcode, hex,
                                 events[i].rssi, events[i].ttl,
                                 (unsigned long)events[i].received_ms);
-            if (written < 0 || (size_t)written >= capacity) {
+            if (appended < 0 || (size_t)appended >= remaining) {
+                body_ok = false;
                 break;
             }
+            written += appended;
         }
-        snprintf(body + written, capacity - (size_t)written, "]}");
+        if (body_ok) {
+            size_t remaining = capacity - (size_t)written;
+            int appended = snprintf(body + written, remaining, "]}");
+            if (appended < 0 || (size_t)appended >= remaining) {
+                body_ok = false;
+            }
+        }
+        if (!body_ok) {
+            ESP_LOGW(TAG, "upload body too large; retaining %u events", (unsigned)count);
+            free(body);
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
 
         char url[192];
         snprintf(url, sizeof(url), "%s/api/gateway/%s/events", BM_SERVER_URL, BM_GATEWAY_ID);

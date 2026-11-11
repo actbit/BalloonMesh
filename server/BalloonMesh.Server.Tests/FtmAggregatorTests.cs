@@ -70,4 +70,26 @@ public sealed class FtmAggregatorTests
         Assert.Equal(0, await aggregator.ProcessDueAsync(time.GetUtcNow()));
         Assert.Equal(historyAfterClose, fleet.GetHistory(0x0101, 100).Count);
     }
+
+    [Fact]
+    public async Task ClosingABatchRemovesItsNeighborObservations()
+    {
+        using var database = new TemporaryDatabase();
+        var fleet = new FleetService(database.Store);
+        var neighbors = new NeighborStore();
+        var events = new RecordingMonitorEvents();
+        var time = new TestTimeProvider(new DateTimeOffset(2026, 11, 8, 10, 0, 0, TimeSpan.Zero));
+        var aggregator = new FtmAggregator(
+            fleet, neighbors, new PositionSolver(), events, time,
+            NullLogger<FtmAggregator>.Instance);
+
+        neighbors.Add(0x0101, 7, [new NeighborEntry(0x0102, -50)], time.GetUtcNow());
+        aggregator.AddReport(0x0101, new FtmReport(1, 100, 100, 7), "gateway-a",
+            time.GetUtcNow());
+        time.Advance(TimeSpan.FromSeconds(31));
+
+        await aggregator.ProcessDueAsync(time.GetUtcNow());
+
+        Assert.Empty(neighbors.Get(0x0101, 7));
+    }
 }

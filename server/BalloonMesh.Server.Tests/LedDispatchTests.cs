@@ -123,6 +123,25 @@ public sealed class LedDispatchTests
     }
 
     [Fact]
+    public async Task RecoveryExpiresQueuedStepsThatAreAlreadyPast()
+    {
+        using var database = new TemporaryDatabase();
+        var fleet = new FleetService(database.Store);
+        var events = new RecordingMonitorEvents();
+        var time = new TestTimeProvider(new DateTimeOffset(2026, 11, 8, 10, 0, 0, TimeSpan.Zero));
+        var registry = new GatewayRegistry(events);
+        var dispatch = new LedDispatchService(
+            registry, fleet, database.Store, events, time, NullLogger<LedDispatchService>.Instance);
+        var worker = new ShowRecoveryWorker(
+            database.Store, fleet, dispatch, time, NullLogger<ShowRecoveryWorker>.Instance);
+        var id = database.Store.AddShowStep("past", "all", "all",
+            time.GetUtcNow().AddSeconds(-1), 1, 2, 3, "queued");
+
+        Assert.Equal(0, await worker.RecoverAsync());
+        Assert.Equal("expired", database.Store.GetShowStep(id)!.Status);
+    }
+
+    [Fact]
     public void ZoneCommandsAreRejectedRatherThanBroadcast()
     {
         using var database = new TemporaryDatabase();

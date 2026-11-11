@@ -140,10 +140,7 @@ public sealed record EffectStartRequest(
     byte G2 = 0,
     byte B2 = 0,
     double? DurationSeconds = null,
-    int? FrameIntervalMs = null,
-    bool ClearOnStop = false);
-
-public sealed record EffectStopRequest(bool Clear = false, bool AtCycleEnd = false);
+    int? FrameIntervalMs = null);
 
 public sealed record EffectStateDto(
     string Kind,

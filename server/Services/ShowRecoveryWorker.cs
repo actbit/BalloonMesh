@@ -34,6 +34,11 @@ public sealed class ShowRecoveryWorker : BackgroundService
     {
         var now = _time.GetUtcNow();
         var recovered = 0;
+        var expired = _store.ExpireQueuedShowSteps(now);
+        if (expired > 0)
+        {
+            _logger.LogWarning("{Count} queued show step(s) were already past and were marked expired", expired);
+        }
         foreach (var step in _store.GetPendingShowSteps(now))
         {
             if (cancellationToken.IsCancellationRequested)

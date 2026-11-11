@@ -36,7 +36,7 @@
 - Company ID: `0x02E5`（Espressif）
 - Vendor Opcode: `0xC00000 | (op << 16) | company_id`
   - ESP-IDF `ESP_BLE_MESH_MODEL_OP_3(op, company_id)` と同一の数値表現
-- op: `0x01`〜`0x0A`（README の表）
+- op: `0x01`〜`0x0C`（README の表）
 - Model ID
   - `0x0001`: control（LED コマンド）
   - `0x0002`: telemetry（FTM / NEIGHBOR / QUEUE）
@@ -82,8 +82,8 @@
 - HTTP uplink: `POST /api/gateway/{id}/events`
 - HTTP downlink: `GET /api/gateway/{id}/commands?waitMs=...`
 - WebSocket: `/ws/gateway`
-  - hello: `{"type":"hello","gatewayId":"gw-01","firmware":"0.1.0"}`
-  - uplink: `{"type":"mesh","src":257,"dst":49153,"opcode":...,"payload":"...HEX...","rssi":-55,"ttl":7}`
+  - hello: `{"type":"hello","gatewayId":"gw-01","firmware":"0.1.0","token":"...","provisioned":true,"spoolPending":0}`
+  - uplink: `{"type":"mesh","src":257,"dst":49169,"opcode":...,"payload":"...HEX...","rssi":-55,"ttl":7}`（`49169` = `0xC011`、ゲートウェイ向けテレメトリグループ）
   - downlink: `{"type":"mesh","dst":...,"opcode":...,"payload":"...HEX...","ttl":7}`
 
 payload は hex。ACK は実装していません。Gateway は重複排除・集約をせず、受信した全メッセージを転送します。
@@ -132,14 +132,12 @@ payload は hex。ACK は実装していません。Gateway は重複排除・�
 - 後方ジャンプ: 予約は保持し、実行済み tick 以下の再登録を拒否
 - 100ms 同期精度は実機の GNSS / Mesh 遅延を含めて未検証
 
-## 12. Arduino framework の BLE Mesh Node
+## 12. BLE Mesh Node のビルド構成
 
-**重要:** PlatformIO の `framework = arduino`（espressif32 6.9.0 / Arduino-ESP32 2.0.17）が同梱する `libbt.a` は、`CONFIG_BLE_MESH_NODE` を無効にした sdkconfig でビルドされています。本実装はヘッダの Node 構造体を有効化するために `-DCONFIG_BLE_MESH_NODE=1` を定義しています。
+**重要:** PlatformIO の `framework = arduino`（espressif32 6.9.0 / Arduino-ESP32 2.0.17）が同梱する `libbt.a` は、`CONFIG_BLE_MESH_NODE` を無効にした sdkconfig でビルドされています。役割ごとに次の構成を採用しています。
 
-- コンパイルとリンクは通る
-- 実機での Provisioning / Node 動作は、プリビルド `libbt.a` の構成に依存する
-- 確実に動作させるには、`CONFIG_BLE_MESH_NODE=y` でビルドした Arduino-ESP32 もしくは ESP-IDF ライブラリが必要
-- Gateway / Balloon の両方に同じ制約がある
+- `balloon`: `framework = arduino, espidf` とし、ESP-IDF 4.4.7 を Arduino のコンポーネントとして組み込む。`balloon/sdkconfig.defaults` で `CONFIG_BLE_MESH_NODE=y` ほかを有効化して Bluetooth スタックを再ビルドし、`src/CMakeLists.txt` でアプリのソースを ESP-IDF に登録する。`-DCONFIG_BLE_MESH_NODE=1` は使わない。
+- `gateway`: Arduino 単体構成のまま `-DCONFIG_BLE_MESH_NODE=1` を定義し、ヘッダの Node 構造体だけを有効化する。実機での Provisioning / Node 動作はプリビルド `libbt.a` の構成に依存し、ESP-IDF 統合と実機検証は未実施。
 
 Arduino を維持する場合の推奨確認手順:
 
@@ -150,7 +148,7 @@ Arduino を維持する場合の推奨確認手順:
 ## 13. 実装済みの追加項目
 
 - バルーン LED キューの NVS スナップショット保存・復元（2 秒 debounce）
-- サーバのゾーン作成・バルーン移動・空グループ削除
+- サーバのグループ作成・バルーン移動・空グループ削除（`FleetService` / `DataStore`。HTTP API / UI は未公開）
 - 予約コマンド一覧と LED_CANCEL 連携キャンセル
 - Gateway の WebSocket（WSS 対応）/ HTTPS HTTP ポーリング二系統
 - Gateway の HTTPS 接続（CA 未設定時はピン留めなし）
@@ -164,11 +162,14 @@ Arduino を維持する場合の推奨確認手順:
 - Cookie + OIDC / Discord 認証
 - Viewer / Operator / Admin のロールポリシー
 - Admin 専用 MOCK オンボーディング UI / API / SignalR
-- 抽象エフェクト（flow / wave / pulse / rainbow）を既定画面にするコンポーザー
-  - サーバ側の `EffectService` が毎フレーム色を計算し、既存の `LED_SET_NOW` をユニキャスト送信
+- 抽象エフェクト（flow / wave / pulse / rainbow / twinkle / alternate / solid）を既定画面にするコンポーザー
+  - サーバ側の `EffectService` が約30秒先までのフレーム色を計算し、既存の時刻指定 `LED_SET` として段階的に予約
+  - 全ノードが同じ色のフレームはグループ `0xC010` 宛て1命令、それ以外はノードごとのユニキャストに展開
+  - 各周期の終わりに全ノード向けの消灯を1フレーム予約し、40ms 後に次の周期を再開
   - ファームウェアに `LED_EFFECT_NOW` / `LED_FLOW_NOW` を追加せず、既存オペコードだけで表現
   - `GET /api/effects`、`POST /api/effects/start`、`POST /api/effects/stop`、SignalR `effectChanged`
   - ブラウザは同じ式でローカルプレビューし、詳細設定は `/control` に残す
+  - ゲートウェイへ渡す前に期限切れになった予約は画面に警告。ゲートウェイ投入後の未達は検出しない
 
 ## 14. 未実装 / 今後の課題
 

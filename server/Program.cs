@@ -324,7 +324,7 @@ app.MapPost("/api/effects/start", async (EffectStartRequest request, EffectServi
     }
 }).RequireAuthorization(AuthRoles.Operator);
 
-app.MapPost("/api/effects/stop", async (EffectStopRequest request, EffectService effects,
+app.MapPost("/api/effects/stop", async (EffectService effects,
     CancellationToken cancellationToken) =>
 {
     try

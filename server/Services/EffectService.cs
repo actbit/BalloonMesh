@@ -71,6 +71,10 @@ public sealed class EffectService : BackgroundService
             }
             origin = balloons.FirstOrDefault(balloon => balloon.MeshAddress == address)
                 ?? throw new ArgumentException($"Origin balloon '{request.Origin}' was not found.");
+            if (origin.Lat is null || origin.Lon is null)
+            {
+                throw new ArgumentException($"Origin balloon '{request.Origin}' has no position fix.");
+            }
         }
 
         var defaults = DefaultsFor(kind);
@@ -381,7 +385,7 @@ public sealed class EffectService : BackgroundService
                 var hue = elapsed * run.Speed / run.Wavelength + distance / run.Wavelength;
                 hue -= Math.Floor(hue);
                 var (r, g, b) = HsvToRgb(hue, 0.9, 1.0);
-                return ((byte)Math.Round(r * 0.85), (byte)Math.Round(g * 0.85), (byte)Math.Round(b * 0.85));
+                return (RoundByte(r * 0.85), RoundByte(g * 0.85), RoundByte(b * 0.85));
             }
             default:
                 return (0, 0, 0);
@@ -406,11 +410,12 @@ public sealed class EffectService : BackgroundService
         var r = (run.R2 + (run.R - run.R2) * value) * value;
         var g = (run.G2 + (run.G - run.G2) * value) * value;
         var b = (run.B2 + (run.B - run.B2) * value) * value;
-        return (
-            (byte)Math.Round(Math.Clamp(r, 0, 255)),
-            (byte)Math.Round(Math.Clamp(g, 0, 255)),
-            (byte)Math.Round(Math.Clamp(b, 0, 255)));
+        return (RoundByte(r), RoundByte(g), RoundByte(b));
     }
+
+    /// <summary>Matches JavaScript's Math.round (midpoints round away from zero).</summary>
+    private static byte RoundByte(double value) =>
+        (byte)Math.Round(Math.Clamp(value, 0, 255), MidpointRounding.AwayFromZero);
 
     private static (double R, double G, double B) HsvToRgb(double hue, double saturation, double value)
     {
@@ -480,8 +485,8 @@ public sealed class EffectService : BackgroundService
             "wave" => (45, 150, 0.35, 90),
             "pulse" => (1, 3, 1, 0),
             "rainbow" => (25, 240, 1, 0),
-        "twinkle" or "alternate" => (1, 6, 1, 0),
-        "solid" => (1, 10, 1, 0),
+            "twinkle" or "alternate" => (1, 6, 1, 0),
+            "solid" => (1, 10, 1, 0),
             _ => (45, 150, 0.35, 0)
         };
 

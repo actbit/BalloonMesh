@@ -125,7 +125,8 @@ public sealed class FtmAggregator
                     key,
                     batch.Reports.Values.ToArray(),
                     batch.InitialComputed,
-                    now));
+                    now,
+                    closeDue));
             }
 
             batch.InitialComputed = true;
@@ -154,65 +155,75 @@ public sealed class FtmAggregator
         var computed = 0;
         foreach (var item in due)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var previous = _fleet.GetBalloonRecord(item.Key.Source);
-            var constraints = new List<RangeConstraint>();
-            foreach (var report in item.Reports)
+            try
             {
-                if (!anchors.TryGetValue(report.AnchorId, out var anchor))
+                cancellationToken.ThrowIfCancellationRequested();
+                var previous = _fleet.GetBalloonRecord(item.Key.Source);
+                var constraints = new List<RangeConstraint>();
+                foreach (var report in item.Reports)
+                {
+                    if (!anchors.TryGetValue(report.AnchorId, out var anchor))
+                    {
+                        continue;
+                    }
+                    constraints.Add(new RangeConstraint(
+                        new GeoPoint(anchor.Lat, anchor.Lon),
+                        report.DistanceCm / 100.0,
+                        1.0,
+                        "ftm"));
+                }
+
+                foreach (var neighbor in _neighbors.Get(item.Key.Source, item.Key.Batch))
+                {
+                    var record = _fleet.GetBalloonRecord(neighbor.NeighborAddress);
+                    if (record?.Lat is not { } lat || record.Lon is not { } lon)
+                    {
+                        continue;
+                    }
+                    constraints.Add(new RangeConstraint(
+                        new GeoPoint(lat, lon),
+                        PositionSolver.RssiToDistanceMeters(neighbor.RssiDbm),
+                        0.15,
+                        "neighbor"));
+                }
+
+                if (constraints.Count == 0)
                 {
                     continue;
                 }
-                constraints.Add(new RangeConstraint(
-                    new GeoPoint(anchor.Lat, anchor.Lon),
-                    report.DistanceCm / 100.0,
-                    1.0,
-                    "ftm"));
-            }
 
-            foreach (var neighbor in _neighbors.Get(item.Key.Source, item.Key.Batch))
-            {
-                var record = _fleet.GetBalloonRecord(neighbor.NeighborAddress);
-                if (record?.Lat is not { } lat || record.Lon is not { } lon)
+                GeoPoint? prior = previous?.Lat is { } previousLat && previous.Lon is { } previousLon
+                    ? new GeoPoint(previousLat, previousLon)
+                    : null;
+                var solution = _solver.Solve(constraints, prior);
+                if (solution is null)
                 {
                     continue;
                 }
-                constraints.Add(new RangeConstraint(
-                    new GeoPoint(lat, lon),
-                    PositionSolver.RssiToDistanceMeters(neighbor.RssiDbm),
-                    0.15,
-                    "neighbor"));
-            }
 
-            if (constraints.Count == 0)
+                var dto = _fleet.ApplyPosition(
+                    item.Key.Source,
+                    solution.Position.Latitude,
+                    solution.Position.Longitude,
+                    solution.Confidence,
+                    item.Key.Batch,
+                    solution.Method,
+                    item.ComputedAt);
+                _ = _notifier.BalloonUpdatedAsync(dto);
+                _logger.LogInformation(
+                    "position {Source:X4} batch {Batch}: {Lat:F6},{Lon:F6} conf={Confidence:F2} method={Method} anchors={Anchors}",
+                    item.Key.Source, item.Key.Batch, solution.Position.Latitude,
+                    solution.Position.Longitude, solution.Confidence, solution.Method,
+                    constraints.Count(c => c.Source == "ftm"));
+                computed++;
+            }
+            finally
             {
-                continue;
+                if (item.IsFinal)
+                {
+                    _neighbors.Remove(item.Key.Source, item.Key.Batch);
+                }
             }
-
-            GeoPoint? prior = previous?.Lat is { } previousLat && previous.Lon is { } previousLon
-                ? new GeoPoint(previousLat, previousLon)
-                : null;
-            var solution = _solver.Solve(constraints, prior);
-            if (solution is null)
-            {
-                continue;
-            }
-
-            var dto = _fleet.ApplyPosition(
-                item.Key.Source,
-                solution.Position.Latitude,
-                solution.Position.Longitude,
-                solution.Confidence,
-                item.Key.Batch,
-                solution.Method,
-                item.ComputedAt);
-            _ = _notifier.BalloonUpdatedAsync(dto);
-            _logger.LogInformation(
-                "position {Source:X4} batch {Batch}: {Lat:F6},{Lon:F6} conf={Confidence:F2} method={Method} anchors={Anchors}",
-                item.Key.Source, item.Key.Batch, solution.Position.Latitude,
-                solution.Position.Longitude, solution.Confidence, solution.Method,
-                constraints.Count(c => c.Source == "ftm"));
-            computed++;
         }
         return computed;
     }
@@ -251,5 +262,6 @@ public sealed class FtmAggregator
         BatchKey Key,
         IReadOnlyList<FtmReport> Reports,
         bool WasRefresh,
-        DateTimeOffset ComputedAt);
+        DateTimeOffset ComputedAt,
+        bool IsFinal);
 }

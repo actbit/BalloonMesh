@@ -672,6 +672,22 @@ public sealed class DataStore
         }
     }
 
+    /// <summary>Marks queued steps that were already due as expired.</summary>
+    public int ExpireQueuedShowSteps(DateTimeOffset before)
+    {
+        lock (_writeGate)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                UPDATE show_steps SET status = 'expired'
+                WHERE status = 'queued' AND execute_at <= @before;
+                """;
+            command.Parameters.AddWithValue("before", before);
+            return command.ExecuteNonQuery();
+        }
+    }
+
     public IReadOnlyList<ShowStepRecord> GetPendingShowSteps(DateTimeOffset after)
     {
         using var connection = Open();
