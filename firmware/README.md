@@ -81,3 +81,9 @@ balloon は XIAO ESP32C3 の **D0/D1/D2 (GPIO2/3/4)** を **LEDC 5kHz / 8bit** �
 ## Arduino BLE Mesh の注意
 
 Arduino-ESP32 のプリビルド `libbt.a` は `CONFIG_BLE_MESH_NODE` が無効な sdkconfig でビルドされています。`balloon` / `gateway` はヘッダ構造体を有効化するため `-DCONFIG_BLE_MESH_NODE=1` を付けていますが、実機 Provisioning はプリビルド構成に依存します。詳細は `../docs/decisions.md` を参照してください。
+
+## モバイルバッテリー停止防止（balloon）
+
+LEDが消灯中は、12秒ごとにRGB各38/255（約15%）で1秒間点灯します。通常の点灯命令が有効な間は点灯しません。命令が点灯中に届いた場合も命令を優先します。この点灯は保存されるLED状態を変更しません。
+
+実際のUSB電流はLEDや駆動回路に依存し、150mAや電源維持を保証しません。実機のUSB電流とバッテリーの停止防止効果を確認してください。

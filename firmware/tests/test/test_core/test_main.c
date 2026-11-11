@@ -6,6 +6,7 @@
 #include "unity.h"
 
 #include "balloon_led_queue.h"
+#include "balloon_keepalive.h"
 #include "balloon_neighbor.h"
 #include "balloon_nmea.h"
 #include "balloon_protocol.h"
@@ -274,8 +275,28 @@ static void test_neighbor_median_and_top10(void) {
     TEST_ASSERT_EQUAL_UINT16(0x102, results[9].mesh_addr);
 }
 
+static void test_keepalive_respects_commands_and_rollover(void) {
+    bm_keepalive_t state = {0};
+    TEST_ASSERT_FALSE(bm_keepalive_update(&state, 11999, false));
+    TEST_ASSERT_TRUE(bm_keepalive_update(&state, 12000, false));
+    TEST_ASSERT_TRUE(state.active);
+    TEST_ASSERT_FALSE(bm_keepalive_update(&state, 12999, false));
+    TEST_ASSERT_TRUE(bm_keepalive_update(&state, 13000, false));
+    TEST_ASSERT_FALSE(state.active);
+    TEST_ASSERT_TRUE(bm_keepalive_update(&state, 24000, false));
+    TEST_ASSERT_TRUE(bm_keepalive_update(&state, 24500, true));
+    TEST_ASSERT_FALSE(state.active);
+    TEST_ASSERT_FALSE(bm_keepalive_update(&state, 40000, true));
+    TEST_ASSERT_FALSE(bm_keepalive_update(&state, 51999, false));
+    TEST_ASSERT_TRUE(bm_keepalive_update(&state, 52000, false));
+    state.last_start_ms = UINT32_MAX - 500u;
+    state.active = false;
+    TEST_ASSERT_TRUE(bm_keepalive_update(&state, 11499, false));
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_keepalive_respects_commands_and_rollover);
     RUN_TEST(test_tick40_roundtrip);
     RUN_TEST(test_led_wire_formats);
     RUN_TEST(test_queue_raw_size_and_overwrite);
