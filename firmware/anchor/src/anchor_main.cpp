@@ -68,12 +68,26 @@ static void udp_task(void *argument) {
     // Wi-Fi must be initialised before WiFiUDP::begin() creates and binds the
     // lwIP socket; otherwise the bind fails and the anchor silently dies.
     WiFi.mode(WIFI_AP);
-    WiFi.softAP(ssid, BM_ANCHOR_WIFI_PASSWORD, BM_ANCHOR_WIFI_CHANNEL, 0, 4);
-    wifi_config_t config = {};
-    if (esp_wifi_get_config(WIFI_IF_AP, &config) == ESP_OK) {
-        config.ap.ftm_responder = true;
-        esp_wifi_set_config(WIFI_IF_AP, &config);
+    // Configure the AP in a single esp_wifi_set_config() call with
+    // ftm_responder set.  Enabling it by re-writing the config after
+    // WiFi.softAP() does not stick (the flag reads back as 0) and the anchor
+    // then rejects every FTM request (FTM_STATUS_CONF_REJECTED).
+    wifi_config_t ap_config = {};
+    strncpy((char *)ap_config.ap.ssid, ssid, sizeof(ap_config.ap.ssid) - 1);
+    ap_config.ap.ssid_len = (uint8_t)strlen(ssid);
+    strncpy((char *)ap_config.ap.password, BM_ANCHOR_WIFI_PASSWORD,
+            sizeof(ap_config.ap.password) - 1);
+    ap_config.ap.channel = BM_ANCHOR_WIFI_CHANNEL;
+    ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    ap_config.ap.max_connection = 4;
+    ap_config.ap.ftm_responder = true;
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "SoftAP config failed: %s", esp_err_to_name(err));
     }
+    // FTM measurements are invalid ("No valid FTM Measurements") on a 40 MHz
+    // link, so keep the AP at 20 MHz; the balloon station does the same.
+    esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
     esp_wifi_ftm_resp_set_offset(0);
 
     WiFiUDP udp;

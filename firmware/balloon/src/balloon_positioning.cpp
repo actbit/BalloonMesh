@@ -106,6 +106,9 @@ static bool measure_anchor(const bm_anchor_entry_t *anchor, uint8_t batch_id,
                            uint8_t *valid_count) {
     ESP_LOGI(TAG, "connecting to %s", anchor->ssid);
     WiFi.begin(anchor->ssid, BM_ANCHOR_WIFI_PASSWORD);
+    // FTM only yields valid measurements on a 20 MHz link (the anchor AP is
+    // HT20 too); an HT40 association ends with "No valid FTM Measurements".
+    esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED && (uint32_t)(millis() - start) < 12000u) {
         delay(100);
