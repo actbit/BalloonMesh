@@ -55,7 +55,8 @@ public sealed class MockProvisioningServiceTests
         using var database = new TemporaryDatabase();
         var service = CreateService(database.Store);
 
-        Assert.True(service.Provision("mock-b-01"));
+        Assert.True(service.Provision("mock-gw-01"));
+        Assert.False(service.Provision("mock-b-01"));
     }
 
     private static MockProvisioningService CreateService(BalloonMesh.Server.Data.DataStore store)
