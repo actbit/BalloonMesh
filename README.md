@@ -284,11 +284,11 @@ dotnet run --project server/BalloonMesh.Server.csproj --urls http://localhost:50
 実機 BLE Mesh Provisioner はまだ未実装のため、Web UI に **Admin 専用の MOCK オンボーディングパネル**を表示します。
 
 - `GET /api/onboarding/mock` — モックデバイス一覧
-- `POST /api/onboarding/mock/{id}/provision` — 数秒かけて `unprovisioned → provisioning → provisioned` をシミュレーション
+- `POST /api/onboarding/mock/{id}/provision` — `{ "groupId": 1 }` を受け取り、数秒かけて `unprovisioned → provisioning → provisioned` をシミュレーション
 - `POST /api/onboarding/mock/reset` — 初期状態へ戻す
 - SignalR `onboardingUpdated` で接続中の全クライアントに反映（REST API は Admin のみ）
 
-実際の Provisioner 本体 / 鍵配布 / model bind / グループ購読の自動化は未実装です（ファームウェアは Provision 完了後に固定グループへ subscribe します）。
+Web UI では Balloon の登録前にゾーングループを選択し、選択値をモックProvisioning状態に保持します。実際の Provisioner 本体 / 鍵配布 / model bind / グループ購読の自動化は未実装です（このパネルは実機接続前のUI/API契約確認用です）。
 
 ### 5. ファームウェア
 

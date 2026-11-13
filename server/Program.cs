@@ -241,10 +241,14 @@ app.MapDelete("/api/show/{id:long}", async (long id, CommandService service,
 app.MapGet("/api/onboarding/mock", (MockProvisioningService service) =>
     Results.Ok(service.Snapshot())).RequireAuthorization(AuthRoles.Admin);
 
-app.MapPost("/api/onboarding/mock/{id}/provision", (string id, MockProvisioningService service) =>
-    service.Provision(id)
+app.MapPost("/api/onboarding/mock/{id}/provision",
+    (string id, ProvisionDeviceRequest request, MockProvisioningService service) =>
+    service.Provision(id, request.GroupId)
         ? Results.Accepted(value: new { id, state = "provisioning" })
-        : Results.BadRequest(new { error = "Unknown device or already provisioning/provisioned." }))
+        : Results.BadRequest(new
+        {
+            error = "Unknown device, invalid group, or already provisioning/provisioned."
+        }))
     .RequireAuthorization(AuthRoles.Admin);
 
 app.MapPost("/api/onboarding/mock/reset", (MockProvisioningService service) =>

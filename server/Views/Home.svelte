@@ -47,6 +47,7 @@
     kind: string;
     uuid: string;
     meshAddress: number | null;
+    groupId: number | null;
     state: string;
     progress: number;
     error: string | null;
@@ -105,6 +106,7 @@
   );
   const onlineCount = $derived(balloons.filter((balloon) => balloon.online).length);
   const provisionedGateways = $derived(gateways.filter((gateway) => gateway.provisioned).length);
+  const zoneGroups = $derived(groups.filter((group) => group.meshGroupAddress !== 0xC010));
 
   function roleLabel(): string {
     return model.canAdmin ? 'Admin' : model.canOperate ? 'Operator' : 'Viewer';
@@ -422,13 +424,22 @@
     }
   }
 
-  async function provisionMock(id: string) {
+  function setOnboardingGroup(id: string, value: string) {
+    const groupId = value === '' ? null : Number(value);
+    onboarding = onboarding.map((device) =>
+      device.id === id ? { ...device, groupId: Number.isInteger(groupId) ? groupId : null } : device);
+  }
+
+  async function provisionMock(id: string, groupId: number | null) {
     if (!model.canAdmin) return;
     try {
-      await api(`/api/onboarding/mock/${id}/provision`, { method: 'POST' });
+      await api(`/api/onboarding/mock/${id}/provision`, {
+        method: 'POST',
+        body: JSON.stringify({ groupId })
+      });
       await fetchOnboarding();
     } catch (error) {
-      addLog(`Mock provision: ${(error as Error).message}`);
+      addLog(`Mock registration: ${(error as Error).message}`);
     }
   }
 
@@ -798,7 +809,7 @@
           <h2>Onboarding <span class="mock-badge">MOCK</span></h2>
           <button class="mini" onclick={resetMockOnboarding}>Reset</button>
         </div>
-        <p class="hint">BLE Mesh Provisioner の UI を模擬しています。Provision は数秒で完了します。</p>
+        <p class="hint">BLE Mesh Provisioner の UI を模擬しています。Balloonは登録先グループを選んでください。</p>
         <ul class="onboarding-list">
           {#each onboarding as device}
             <li>
@@ -807,12 +818,23 @@
                 <strong>{device.name}</strong>
                 <small>{device.uuid.slice(0, 8)}… · {device.meshAddress == null ? 'no addr' : `0x${device.meshAddress.toString(16).toUpperCase()}`}</small>
               </span>
+              {#if device.kind === 'balloon'}
+                <select class="onb-group" value={device.groupId ?? ''}
+                        onchange={(event) => setOnboardingGroup(device.id, (event.currentTarget as HTMLSelectElement).value)}
+                        disabled={device.state === 'provisioning' || device.state === 'provisioned'}>
+                  <option value="">Group…</option>
+                  {#each zoneGroups as group}
+                    <option value={group.id}>{group.name}</option>
+                  {/each}
+                </select>
+              {/if}
               <span class="show-status"
                     class:queued={device.state === 'provisioned'}
                     class:canceled={device.state === 'failed'}
                     class:sent={device.state === 'provisioning'}>{device.state}</span>
               {#if device.state === 'unprovisioned' || device.state === 'failed'}
-                <button class="mini" onclick={() => provisionMock(device.id)}>Provision</button>
+                <button class="mini" onclick={() => provisionMock(device.id, device.groupId)}
+                        disabled={device.kind === 'balloon' && device.groupId == null}>Register</button>
               {/if}
             </li>
             {#if device.state === 'provisioning'}
@@ -1152,6 +1174,11 @@
   .onb-main { display: flex; flex-direction: column; min-width: 0; }
   .onb-main strong { font-size: 11px; }
   .onb-main small { font-size: 9px; color: #94a3b8; }
+  .onb-group {
+    max-width: 92px; padding: 4px 5px; border-radius: 7px;
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    background: rgba(15, 23, 42, 0.8); color: #e2e8f0; font-size: 9px;
+  }
   .progress-row { padding-left: 28px; }
   .progress-row small { font-size: 9px; color: #94a3b8; width: 30px; text-align: right; }
   .progress { flex: 1; height: 4px; border-radius: 999px; background: rgba(148, 163, 184, 0.18); overflow: hidden; }

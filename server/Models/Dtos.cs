@@ -27,10 +27,13 @@ public sealed record MockProvisioningDevice(
     string Kind,
     string Uuid,
     ushort? MeshAddress,
+    int? GroupId,
     string State,
     int Progress,
     string? Error,
     DateTimeOffset UpdatedAt);
+
+public sealed record ProvisionDeviceRequest(int? GroupId);
 
 public sealed record BalloonDto(
     ushort MeshAddress,

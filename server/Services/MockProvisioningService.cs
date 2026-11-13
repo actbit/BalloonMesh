@@ -1,5 +1,6 @@
 using BalloonMesh.Server.Hubs;
 using BalloonMesh.Server.Models;
+using BalloonMesh.Protocol;
 
 namespace BalloonMesh.Server.Services;
 
@@ -12,12 +13,15 @@ public sealed class MockProvisioningService
 {
     private readonly object _gate = new();
     private readonly List<MockProvisioningDevice> _devices;
+    private readonly FleetService _fleet;
     private readonly IMonitorEvents _notifier;
     private readonly ILogger<MockProvisioningService> _logger;
     private int _session;
 
-    public MockProvisioningService(IMonitorEvents notifier, ILogger<MockProvisioningService> logger)
+    public MockProvisioningService(FleetService fleet, IMonitorEvents notifier,
+        ILogger<MockProvisioningService> logger)
     {
+        _fleet = fleet;
         _notifier = notifier;
         _logger = logger;
         _devices = CreateInitial();
@@ -31,7 +35,7 @@ public sealed class MockProvisioningService
         }
     }
 
-    public bool Provision(string id)
+    public bool Provision(string id, int? groupId)
     {
         bool shouldFail;
         int session;
@@ -49,11 +53,16 @@ public sealed class MockProvisioningService
             {
                 return false;
             }
+            if (device.Kind == "balloon" && !IsValidBalloonGroup(groupId))
+            {
+                return false;
+            }
             shouldFail = id == "mock-b-03";
             _devices[index] = device with
             {
                 State = "provisioning",
                 Progress = 5,
+                GroupId = groupId,
                 Error = null,
                 UpdatedAt = DateTimeOffset.UtcNow
             };
@@ -195,21 +204,32 @@ public sealed class MockProvisioningService
 
     private Task NotifyAsync() => _notifier.OnboardingUpdatedAsync(Snapshot());
 
+    private bool IsValidBalloonGroup(int? groupId)
+    {
+        if (groupId is null)
+        {
+            return false;
+        }
+
+        var group = _fleet.GetGroups().FirstOrDefault(item => item.Id == groupId.Value);
+        return group is not null && group.MeshGroupAddress != BalloonProtocol.GroupLedAll;
+    }
+
     private static List<MockProvisioningDevice> CreateInitial() =>
     [
         new("mock-b-01", "B-Mock-01", "balloon",
-            "B1A11000000111223344001122334455", null, "unprovisioned", 0, null, DateTimeOffset.UtcNow),
+            "B1A11000000111223344001122334455", null, null, "unprovisioned", 0, null, DateTimeOffset.UtcNow),
         new("mock-b-02", "B-Mock-02", "balloon",
-            "B1A11000000111223344001122334466", 0x0141, "provisioned", 100, null, DateTimeOffset.UtcNow),
+            "B1A11000000111223344001122334466", 0x0141, 1, "provisioned", 100, null, DateTimeOffset.UtcNow),
         new("mock-b-03", "B-Mock-03", "balloon",
-            "B1A11000000111223344001122334477", null, "failed", 70,
+            "B1A11000000111223344001122334477", null, null, "failed", 70,
             "Provisioning timed out (mock)", DateTimeOffset.UtcNow),
         new("mock-b-04", "B-Mock-04", "balloon",
-            "B1A11000000111223344001122334488", null, "failed", 60,
+            "B1A11000000111223344001122334488", null, null, "failed", 60,
             "Provisioning was interrupted (mock)", DateTimeOffset.UtcNow),
         new("mock-b-05", "B-Mock-05", "balloon",
-            "B1A11000000111223344001122334499", null, "unprovisioned", 0, null, DateTimeOffset.UtcNow),
+            "B1A11000000111223344001122334499", null, null, "unprovisioned", 0, null, DateTimeOffset.UtcNow),
         new("mock-gw-01", "GW-Mock-01", "gateway",
-            "B1A110000001112233440011223344AA", null, "unprovisioned", 0, null, DateTimeOffset.UtcNow)
+            "B1A110000001112233440011223344AA", null, null, "unprovisioned", 0, null, DateTimeOffset.UtcNow)
     ];
 }
