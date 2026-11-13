@@ -290,6 +290,8 @@ dotnet run --project server/BalloonMesh.Server.csproj --urls http://localhost:50
 
 Web UI では Balloon の登録前にゾーングループを選択し、選択値をモックProvisioning状態に保持します。実際の Provisioner 本体 / 鍵配布 / model bind / グループ購読の自動化は未実装です（このパネルは実機接続前のUI/API契約確認用です）。
 
+SignalR 再接続時は状態を再取得し、登録要求の応答だけが切断で失われた場合も、同じ端末・同じグループへの再送は冪等に扱います。登録途中で別グループへ変更する再送は拒否します。
+
 ### 5. ファームウェア
 
 各デバイスは独立した PlatformIO プロジェクトです。

@@ -55,9 +55,16 @@ public sealed class MockProvisioningService
                 return false;
             }
             var device = _devices[index];
-            if (device.State is "provisioned" or "provisioning")
+            if (device.State == "provisioned")
             {
                 return false;
+            }
+            if (device.State == "provisioning")
+            {
+                // A client may have lost the response after the server accepted
+                // the request. Treat the same request as an idempotent retry,
+                // but do not let a retry change the selected group.
+                return device.GroupId == groupId;
             }
             if (device.Kind == "balloon" && !IsValidBalloonGroup(groupId))
             {

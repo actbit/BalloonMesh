@@ -32,6 +32,17 @@ public sealed class MockProvisioningServiceTests
     }
 
     [Fact]
+    public void RetryingTheSameInFlightRegistrationIsIdempotent()
+    {
+        using var database = new TemporaryDatabase();
+        var service = CreateService(database.Store);
+
+        Assert.True(service.Provision("mock-b-01", 2));
+        Assert.True(service.Provision("mock-b-01", 2));
+        Assert.False(service.Provision("mock-b-01", 3));
+    }
+
+    [Fact]
     public void AllBalloonsGroupCannotBeSelectedForProvisioning()
     {
         using var database = new TemporaryDatabase();

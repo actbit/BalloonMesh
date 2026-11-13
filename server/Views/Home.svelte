@@ -402,7 +402,13 @@
       if (result?.message) addLog(result.message);
     });
     hub.onreconnecting(() => { signalConnected = false; statusLine = 'Reconnecting…'; });
-    hub.onreconnected(() => { signalConnected = true; statusLine = 'Live'; });
+    hub.onreconnected(() => {
+      signalConnected = true;
+      statusLine = 'Live';
+      // SignalR does not replay missed events. Reconcile the full state after
+      // reconnect so an in-flight registration is not shown stale.
+      void fetchState();
+    });
     hub.onclose(() => { signalConnected = false; statusLine = 'Disconnected'; });
 
     try {
@@ -443,6 +449,10 @@
       await fetchOnboarding();
     } catch (error) {
       addLog(`Mock registration: ${(error as Error).message}`);
+      // The request may have reached the server even if its response was lost
+      // during a disconnect. Re-read the authoritative state before allowing
+      // the operator to decide whether a retry is needed.
+      await fetchState();
     } finally {
       registering = registering.filter((item) => item !== id);
     }
