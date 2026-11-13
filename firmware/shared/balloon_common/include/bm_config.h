@@ -41,6 +41,15 @@
 #define BM_DEV_UNICAST_ADDR 0u
 #endif
 
+/* XIAO ESP32C3 BOOT button.  The button is active-low and is checked after
+ * normal application startup, not while the ROM bootloader samples straps. */
+#ifndef BM_BOOT_BUTTON_GPIO
+#define BM_BOOT_BUTTON_GPIO 9
+#endif
+#ifndef BM_NVS_RESET_HOLD_MS
+#define BM_NVS_RESET_HOLD_MS 3000u
+#endif
+
 /* Anchor SoftAP and Protocol A. */
 #define BM_ANCHOR_SSID_PREFIX "BM-ANCHOR-"
 #define BM_ANCHOR_WIFI_PASSWORD "balloonmesh"

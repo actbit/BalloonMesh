@@ -13,6 +13,7 @@
 #include "nvs_flash.h"
 
 #include "bm_config.h"
+#include "bm_nvs_reset.h"
 #include "gateway_mesh.h"
 #include "gateway_spool.h"
 #include "gateway_ws.h"
@@ -293,10 +294,12 @@ void setup() {
     Serial.println("[GW] setup starting...");
     Serial.flush();
 
-#if defined(BM_DEV_AUTO_PROV_RESET_NVS) && BM_DEV_AUTO_PROV_RESET_NVS
-    Serial.println("[GW] BM_DEV_AUTO_PROV_RESET_NVS enabled: erasing NVS");
-    ESP_ERROR_CHECK(nvs_flash_erase());
-#endif
+    bool reset_nvs = bm_nvs_reset_pending();
+    if (reset_nvs) {
+        ESP_LOGW(TAG, "BOOT requested NVS erase");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        bm_nvs_reset_clear();
+    }
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -306,6 +309,7 @@ void setup() {
     ESP_ERROR_CHECK(err);
     Serial.println("[GW] NVS initialized");
     Serial.flush();
+    bm_check_boot_button_nvs_reset(TAG);
 
     bm_gateway_spool_init();
     Serial.println("[GW] spool initialized");
@@ -334,5 +338,6 @@ void setup() {
 }
 
 void loop() {
-    delay(1000);
+    bm_check_boot_button_nvs_reset(TAG);
+    delay(100);
 }
