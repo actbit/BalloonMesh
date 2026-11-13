@@ -221,6 +221,33 @@ app.MapGet("/api/groups", (FleetService fleet) => Results.Ok(fleet.GetGroups()))
 app.MapGet("/api/gateways", (GatewayRegistry gateways) => Results.Ok(gateways.Snapshot()))
     .RequireAuthorization(AuthRoles.Viewer);
 
+app.MapPost("/api/gateway/{id}/mesh-address",
+    (HttpContext http, string id, GatewayMeshAddressRequest request,
+        DataStore store, IConfiguration configuration) =>
+    {
+        if (!GatewayAuth.IsAuthorized(http, configuration))
+        {
+            return Results.Unauthorized();
+        }
+        try
+        {
+            var identity = store.GetOrAllocateGatewayMeshIdentity(id, request.DeviceUuid);
+            return Results.Ok(new
+            {
+                gatewayId = identity.GatewayId,
+                meshAddress = identity.MeshAddress
+            });
+        }
+        catch (ArgumentException exception)
+        {
+            return Results.BadRequest(new { error = exception.Message });
+        }
+        catch (InvalidOperationException exception)
+        {
+            return Results.Conflict(new { error = exception.Message });
+        }
+    });
+
 app.MapGet("/api/show", (DataStore store, int? limit) =>
     Results.Ok(store.GetShowSteps(limit ?? 50))).RequireAuthorization(AuthRoles.Viewer);
 

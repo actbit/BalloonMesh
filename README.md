@@ -314,7 +314,7 @@ pio run -t upload
 | `firmware/anchor` | GPS 基準局 | NMEA UART、SoftAP、FTM Responder、UDP |
 | `firmware/gateway` | Mesh Gateway | BLE Mesh Node、WebSocket（既定）/ HTTP ポーリング |
 
-`anchor` は `platformio.ini` の `-DBM_ANCHOR_ID=N` で ID を変えてビルドします。`gateway` は `firmware/shared/balloon_common/include/bm_config.h` の `BM_GATEWAY_ID` / `BM_SERVER_URL` / Wi-Fi 設定（または `platformio.ini` の `-D` 上書き）を環境に合わせて変更してください。`balloon` は通常の `balloon` 環境に加え、測位を無効化した BLE Mesh 立ち上げ用の `balloon-mesh-bringup` 環境も利用できます。
+`anchor` は `platformio.ini` の `-DBM_ANCHOR_ID=N` で ID を変えてビルドします。`gateway` のIDはBluetooth MACから自動生成され、必要な場合だけ `firmware/shared/balloon_common/include/bm_config.h` の `BM_GATEWAY_ID` / `BM_SERVER_URL` / Wi-Fi 設定（または `platformio.ini` の `-D` 上書き）を変更してください。`balloon` は通常の `balloon` 環境に加え、測位を無効化した BLE Mesh 立ち上げ用の `balloon-mesh-bringup` 環境も利用できます。
 
 一括ビルド:
 

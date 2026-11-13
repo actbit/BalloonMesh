@@ -13,6 +13,7 @@
 #include "nvs_flash.h"
 
 #include "bm_config.h"
+#include "bm_device_id.h"
 #include "bm_nvs_reset.h"
 #include "gateway_mesh.h"
 #include "gateway_spool.h"
@@ -55,6 +56,109 @@ private:
     WiFiClient plain_;
     WiFiClientSecure secure_;
 };
+
+#if defined(BM_DEV_AUTO_PROV) && BM_DEV_AUTO_PROV
+static void encode_device_uuid(char *out, size_t out_size) {
+    uint8_t uuid[16] = {0};
+    bm_device_uuid(uuid);
+    static const char digits[] = "0123456789ABCDEF";
+    size_t position = 0;
+    for (size_t i = 0; i < sizeof(uuid) && position + 2 < out_size; ++i) {
+        out[position++] = digits[uuid[i] >> 4];
+        out[position++] = digits[uuid[i] & 0x0F];
+    }
+    out[position] = '\0';
+}
+#endif
+
+static void prepare_wifi(void) {
+    WiFi.persistent(false);
+    WiFi.mode(WIFI_STA);
+    /* ESP32-C3 shares one radio between Wi-Fi and BLE Mesh.  Keep modem sleep
+     * enabled for coexistence (the balloon firmware does the same). */
+    WiFi.setSleep(true);
+}
+
+static bool connect_wifi_once(void) {
+    if (WiFi.status() == WL_CONNECTED) {
+        return true;
+    }
+
+    ESP_LOGI(TAG, "connecting Wi-Fi SSID=%s", BM_GATEWAY_WIFI_SSID);
+    Serial.printf("[GW] connecting Wi-Fi SSID=%s\n", BM_GATEWAY_WIFI_SSID);
+    Serial.flush();
+    WiFi.begin(BM_GATEWAY_WIFI_SSID, BM_GATEWAY_WIFI_PASSWORD);
+    uint32_t start = millis();
+    while (WiFi.status() != WL_CONNECTED &&
+           (uint32_t)(millis() - start) < 15000u) {
+        delay(200);
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+        ESP_LOGW(TAG, "Wi-Fi connection failed");
+        Serial.println("[GW] Wi-Fi connection failed, retrying...");
+        Serial.flush();
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Wi-Fi connected, IP=%s", WiFi.localIP().toString().c_str());
+    Serial.printf("[GW] Wi-Fi connected! IP=%s\n", WiFi.localIP().toString().c_str());
+    Serial.flush();
+    return true;
+}
+
+#if defined(BM_DEV_AUTO_PROV) && BM_DEV_AUTO_PROV
+static uint16_t request_development_mesh_address(void) {
+    if (!bm_device_gateway_id_is_valid() || WiFi.status() != WL_CONNECTED) {
+        return 0;
+    }
+
+    char device_uuid[33];
+    encode_device_uuid(device_uuid, sizeof(device_uuid));
+    char url[224];
+    snprintf(url, sizeof(url), "%s/api/gateway/%s/mesh-address", BM_SERVER_URL,
+             bm_device_gateway_id());
+
+    GatewayHttpClient transport;
+    HTTPClient http;
+    if (!http.begin(transport.client(), url)) {
+        ESP_LOGW(TAG, "development Mesh address request could not start");
+        return 0;
+    }
+    http.setTimeout(5000);
+    http.addHeader("Content-Type", "application/json");
+    if (strlen(BM_GATEWAY_TOKEN) > 0) {
+        http.addHeader("X-Gateway-Token", BM_GATEWAY_TOKEN);
+    }
+
+    char body[64];
+    snprintf(body, sizeof(body), "{\"deviceUuid\":\"%s\"}", device_uuid);
+    int code = http.POST((uint8_t *)body, strlen(body));
+    if (code < 200 || code >= 300) {
+        ESP_LOGW(TAG, "development Mesh address request failed HTTP %d", code);
+        http.end();
+        return 0;
+    }
+
+    String response = http.getString();
+    http.end();
+    cJSON *root = cJSON_Parse(response.c_str());
+    if (root == NULL) {
+        ESP_LOGW(TAG, "development Mesh address response was not JSON");
+        return 0;
+    }
+    cJSON *mesh_address = cJSON_GetObjectItem(root, "meshAddress");
+    uint16_t result = 0;
+    if (cJSON_IsNumber(mesh_address) && mesh_address->valueint >= 0x4000 &&
+        mesh_address->valueint <= 0x7FFF) {
+        result = (uint16_t)mesh_address->valueint;
+    }
+    cJSON_Delete(root);
+    if (result == 0) {
+        ESP_LOGW(TAG, "development Mesh address response was invalid");
+    }
+    return result;
+}
+#endif
 
 #if !defined(BM_GATEWAY_USE_WEBSOCKET) || !BM_GATEWAY_USE_WEBSOCKET
 
@@ -121,7 +225,7 @@ static void upload_events_task(void *argument) {
         int written = snprintf(body, capacity,
                                "{\"gatewayId\":\"%s\",\"firmware\":\"%s\","
                                "\"provisioned\":%s,\"spoolPending\":%u,\"events\":[",
-                               BM_GATEWAY_ID, BM_FIRMWARE_VERSION,
+                               bm_device_gateway_id(), BM_FIRMWARE_VERSION,
                                bm_gateway_mesh_is_ready() ? "true" : "false",
                                (unsigned)bm_gateway_spool_count());
         bool body_ok = written > 0 && (size_t)written < capacity;
@@ -164,7 +268,8 @@ static void upload_events_task(void *argument) {
         }
 
         char url[192];
-        snprintf(url, sizeof(url), "%s/api/gateway/%s/events", BM_SERVER_URL, BM_GATEWAY_ID);
+        snprintf(url, sizeof(url), "%s/api/gateway/%s/events", BM_SERVER_URL,
+                 bm_device_gateway_id());
         HTTPClient http;
         http.setTimeout(5000);
         if (http.begin(transport.client(), url)) {
@@ -199,7 +304,8 @@ static void poll_commands_task(void *argument) {
         }
         char url[224];
         snprintf(url, sizeof(url),
-                 "%s/api/gateway/%s/commands?waitMs=10000", BM_SERVER_URL, BM_GATEWAY_ID);
+                 "%s/api/gateway/%s/commands?waitMs=10000", BM_SERVER_URL,
+                 bm_device_gateway_id());
         HTTPClient http;
         http.setTimeout(15000);
         if (!http.begin(transport.client(), url)) {
@@ -256,33 +362,9 @@ static void poll_commands_task(void *argument) {
 
 static void wifi_task(void *argument) {
     (void)argument;
-    WiFi.persistent(false);
-    WiFi.mode(WIFI_STA);
-    /* ESP32-C3 shares one radio between Wi-Fi and BLE Mesh.  Keep modem sleep
-     * enabled for coexistence (the balloon firmware does the same). */
-    WiFi.setSleep(true);
+    prepare_wifi();
     for (;;) {
-        if (WiFi.status() != WL_CONNECTED) {
-            ESP_LOGI(TAG, "connecting Wi-Fi SSID=%s", BM_GATEWAY_WIFI_SSID);
-            Serial.printf("[GW] connecting Wi-Fi SSID=%s\n", BM_GATEWAY_WIFI_SSID);
-            Serial.flush();
-            WiFi.begin(BM_GATEWAY_WIFI_SSID, BM_GATEWAY_WIFI_PASSWORD);
-            uint32_t start = millis();
-            while (WiFi.status() != WL_CONNECTED &&
-                   (uint32_t)(millis() - start) < 15000u) {
-                vTaskDelay(pdMS_TO_TICKS(200));
-            }
-            if (WiFi.status() == WL_CONNECTED) {
-                ESP_LOGI(TAG, "Wi-Fi connected, IP=%s",
-                         WiFi.localIP().toString().c_str());
-                Serial.printf("[GW] Wi-Fi connected! IP=%s\n", WiFi.localIP().toString().c_str());
-                Serial.flush();
-            } else {
-                ESP_LOGW(TAG, "Wi-Fi connection failed");
-                Serial.println("[GW] Wi-Fi connection failed, retrying...");
-                Serial.flush();
-            }
-        }
+        (void)connect_wifi_once();
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
@@ -293,6 +375,13 @@ void setup() {
     esp_log_set_vprintf(vprintf_to_serial);
     Serial.println("[GW] setup starting...");
     Serial.flush();
+
+    if (!bm_device_gateway_id_is_valid()) {
+        ESP_LOGE(TAG, "gateway identity unavailable; refusing to start with a shared ID");
+        while (true) {
+            delay(1000);
+        }
+    }
 
     bool reset_nvs = bm_nvs_reset_pending();
     if (reset_nvs) {
@@ -315,9 +404,20 @@ void setup() {
     Serial.println("[GW] spool initialized");
     Serial.flush();
 
+    uint16_t development_address = 0;
+#if defined(BM_DEV_AUTO_PROV) && BM_DEV_AUTO_PROV
+    prepare_wifi();
+    if (connect_wifi_once()) {
+        development_address = request_development_mesh_address();
+    }
+    if (development_address == 0) {
+        ESP_LOGE(TAG, "central development Mesh address unavailable; auto-provisioning disabled");
+    }
+#endif
+
     Serial.println("[GW] calling bm_gateway_mesh_init...");
     Serial.flush();
-    bm_gateway_mesh_init();
+    bm_gateway_mesh_init(development_address);
     Serial.println("[GW] mesh initialized");
     Serial.flush();
 

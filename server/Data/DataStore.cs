@@ -54,6 +54,11 @@ public sealed record ShowStepRecord(
     byte B,
     string Status);
 
+public sealed record GatewayMeshIdentityRecord(
+    string GatewayId,
+    string DeviceUuid,
+    ushort MeshAddress);
+
 /// <summary>
 /// PostgreSQL persistence.  The live state is small (about 50 balloons), so
 /// commands are straightforward SQL over Npgsql connections.  The optional
@@ -173,6 +178,11 @@ public sealed class DataStore
                 g SMALLINT NOT NULL,
                 b SMALLINT NOT NULL,
                 status TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS gateway_mesh_addresses(
+                gateway_id TEXT PRIMARY KEY,
+                device_uuid TEXT NOT NULL UNIQUE,
+                mesh_address INTEGER NOT NULL UNIQUE,
+                updated_at TIMESTAMPTZ NOT NULL);
             """;
         command.ExecuteNonQuery();
         Seed(connection);
@@ -201,11 +211,130 @@ public sealed class DataStore
             using var connection = Open();
             using var command = connection.CreateCommand();
             command.CommandText = """
-                TRUNCATE TABLE positions, show_steps, balloons, anchors, balloon_groups
+                TRUNCATE TABLE positions, show_steps, gateway_mesh_addresses,
+                    balloons, anchors, balloon_groups
                 RESTART IDENTITY CASCADE;
                 """;
             command.ExecuteNonQuery();
             Seed(connection);
+        }
+    }
+
+    /// <summary>
+    /// Returns the stable development Mesh identity for a gateway, allocating
+    /// the first free gateway address when the device is seen for the first
+    /// time.  The table lock and unique constraints make concurrent requests
+    /// safe across multiple server instances.
+    /// </summary>
+    public GatewayMeshIdentityRecord GetOrAllocateGatewayMeshIdentity(
+        string gatewayId, string deviceUuid)
+    {
+        if (string.IsNullOrWhiteSpace(gatewayId) || gatewayId.Length > 64)
+        {
+            throw new ArgumentException("Gateway ID is required.", nameof(gatewayId));
+        }
+        if (string.IsNullOrWhiteSpace(deviceUuid) || deviceUuid.Length > 64)
+        {
+            throw new ArgumentException("Device UUID is required.", nameof(deviceUuid));
+        }
+
+        gatewayId = gatewayId.Trim();
+        deviceUuid = deviceUuid.Trim().ToUpperInvariant();
+
+        lock (_writeGate)
+        {
+            using var connection = Open();
+            using var transaction = connection.BeginTransaction();
+
+            using (var tableLock = connection.CreateCommand())
+            {
+                tableLock.Transaction = transaction;
+                tableLock.CommandText = "LOCK TABLE gateway_mesh_addresses IN EXCLUSIVE MODE";
+                tableLock.ExecuteNonQuery();
+            }
+
+            GatewayMeshIdentityRecord? existingIdentity = null;
+            using (var existing = connection.CreateCommand())
+            {
+                existing.Transaction = transaction;
+                existing.CommandText = """
+                    SELECT gateway_id, device_uuid, mesh_address
+                    FROM gateway_mesh_addresses
+                    WHERE gateway_id = @gateway_id OR device_uuid = @device_uuid;
+                    """;
+                existing.Parameters.AddWithValue("gateway_id", gatewayId);
+                existing.Parameters.AddWithValue("device_uuid", deviceUuid);
+                using (var reader = existing.ExecuteReader())
+                {
+                    if (reader.Read())
+                    {
+                        var existingGatewayId = reader.GetString(0);
+                        var existingDeviceUuid = reader.GetString(1);
+                        var existingAddress = (ushort)reader.GetInt32(2);
+                        if (!string.Equals(existingGatewayId, gatewayId, StringComparison.Ordinal) ||
+                            !string.Equals(existingDeviceUuid, deviceUuid, StringComparison.Ordinal))
+                        {
+                            throw new InvalidOperationException(
+                                "Gateway ID and device UUID are already assigned to different devices.");
+                        }
+
+                        existingIdentity = new GatewayMeshIdentityRecord(
+                            existingGatewayId, existingDeviceUuid, existingAddress);
+                    }
+                }
+            }
+
+            if (existingIdentity is not null)
+            {
+                transaction.Commit();
+                return existingIdentity;
+            }
+
+            var address = 0x4000;
+            using (var used = connection.CreateCommand())
+            {
+                used.Transaction = transaction;
+                used.CommandText = """
+                    SELECT mesh_address
+                    FROM gateway_mesh_addresses
+                    ORDER BY mesh_address;
+                    """;
+                using var reader = used.ExecuteReader();
+                while (reader.Read())
+                {
+                    var usedAddress = reader.GetInt32(0);
+                    if (usedAddress == address)
+                    {
+                        address++;
+                    }
+                    else if (usedAddress > address)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            if (address > 0x7FFF)
+            {
+                throw new InvalidOperationException("No development gateway Mesh address is available.");
+            }
+
+            using (var insert = connection.CreateCommand())
+            {
+                insert.Transaction = transaction;
+                insert.CommandText = """
+                    INSERT INTO gateway_mesh_addresses(
+                        gateway_id, device_uuid, mesh_address, updated_at)
+                    VALUES(@gateway_id, @device_uuid, @mesh_address, @updated_at);
+                    """;
+                insert.Parameters.AddWithValue("gateway_id", gatewayId);
+                insert.Parameters.AddWithValue("device_uuid", deviceUuid);
+                insert.Parameters.AddWithValue("mesh_address", (int)address);
+                insert.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
+                insert.ExecuteNonQuery();
+            }
+            transaction.Commit();
+            return new GatewayMeshIdentityRecord(gatewayId, deviceUuid, (ushort)address);
         }
     }
 

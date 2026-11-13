@@ -83,13 +83,13 @@ balloon は XIAO ESP32C3 の **D0/D1/D2 (GPIO2/3/4)** を **LEDC 5kHz / 8bit** �
 ### gateway
 - `platformio.ini` の `BM_GATEWAY_USE_WEBSOCKET=1`（既定）
   - `0` にすると HTTP ポーリングへ切り替え
-- `gateway` / `gateway-dev` 環境は起動後に BOOT ボタンを3秒長押しするとNVSを消去できる。`gateway-dev` は開発用自動provisioningを有効にし、Bluetooth MACからユニキャストアドレスを自動生成する。通常の `gateway` 環境では保存済みのprovisioning情報を使用する。
-- `bm_config.h` の `BM_GATEWAY_ID` / `BM_SERVER_URL` / Wi-Fi 設定
+- `gateway` / `gateway-dev` 環境は起動後に BOOT ボタンを3秒長押しするとNVSを消去できる。`gateway-dev` はWi-Fiでサーバーから未使用の `0x4000-0x7FFF` を取得して開発用自動provisioningを行い、通常の `gateway` 環境は標準Provisionerによるprovisioning情報を使用する。
+- Gateway IDはBluetooth MACから自動生成される。再現性が必要なテストや既存設備との互換性が必要な場合だけ `BM_GATEWAY_ID` をbuild flagで上書きする。`BM_SERVER_URL` / Wi-Fi 設定も `bm_config.h` で指定する。
 - WSS/HTTPS の CA は `-DBM_TLS_CA_CERT=\"...\"` で指定
 
 BOOTを押したままリセットするとESP32-C3のROM書き込みモードに入るため、NVS消去は通常起動後に実行する。
 
-開発用アドレスはballoonが `0x0100-0x3FFF`、gatewayが `0x4000-0x7FFF` の範囲から生成する。再現性が必要なテストでは `BM_DEV_UNICAST_ADDR` をbuild flagで上書きできる。
+開発用アドレスはballoonが `0x0100-0x3FFF`、gatewayが `0x4000-0x7FFF` の範囲を使う。gatewayの開発用アドレスはサーバーの台帳で個体ごとに予約される。再現性が必要なテストでは `BM_DEV_UNICAST_ADDR` をbuild flagで上書きできる。
 
 ## 追加実装
 

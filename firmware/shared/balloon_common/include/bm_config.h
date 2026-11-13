@@ -106,7 +106,7 @@ static const bm_anchor_entry_t BM_ANCHORS[] = {
 #define BM_GATEWAY_TOKEN ""
 #endif
 #ifndef BM_GATEWAY_ID
-#define BM_GATEWAY_ID "gw-01"
+#define BM_GATEWAY_ID ""
 #endif
 #ifndef BM_SERVER_URL
 #define BM_SERVER_URL "http://192.168.1.10:5080"

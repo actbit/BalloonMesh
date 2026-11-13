@@ -18,7 +18,9 @@ typedef struct {
     uint32_t received_ms;
 } bm_gateway_event_t;
 
-void bm_gateway_mesh_init(void);
+/* development_address is supplied by the central dev allocator when the
+ * development auto-provisioning profile is enabled; zero disables that path. */
+void bm_gateway_mesh_init(uint16_t development_address);
 bool bm_gateway_mesh_is_provisioned(void);
 /* True only when provisioning is complete and both vendor models are bound to
  * the AppKey.  Downlinks can only be sent in this state. */
