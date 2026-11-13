@@ -35,7 +35,14 @@ public sealed class MockProvisioningService
         }
     }
 
-    public bool Provision(string id, int? groupId)
+    // Keep the original no-body API behavior for existing mock clients. New
+    // callers should use the overload with a group so balloon registrations
+    // cannot accidentally omit their destination group.
+    public bool Provision(string id) => ProvisionCore(id, null, requireBalloonGroup: false);
+
+    public bool Provision(string id, int? groupId) => ProvisionCore(id, groupId, requireBalloonGroup: true);
+
+    private bool ProvisionCore(string id, int? groupId, bool requireBalloonGroup)
     {
         bool shouldFail;
         int session;
@@ -53,7 +60,11 @@ public sealed class MockProvisioningService
             {
                 return false;
             }
-            if (device.Kind == "balloon" && !IsValidBalloonGroup(groupId))
+            if (device.Kind == "balloon" && requireBalloonGroup && !IsValidBalloonGroup(groupId))
+            {
+                return false;
+            }
+            if (device.Kind != "balloon" && groupId is not null)
             {
                 return false;
             }

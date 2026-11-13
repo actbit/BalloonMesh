@@ -40,6 +40,24 @@ public sealed class MockProvisioningServiceTests
         Assert.False(service.Provision("mock-b-01", 5));
     }
 
+    [Fact]
+    public void GatewayCannotBeAssignedToABalloonGroup()
+    {
+        using var database = new TemporaryDatabase();
+        var service = CreateService(database.Store);
+
+        Assert.False(service.Provision("mock-gw-01", 1));
+    }
+
+    [Fact]
+    public void BodylessLegacyProvisioningRemainsAvailable()
+    {
+        using var database = new TemporaryDatabase();
+        var service = CreateService(database.Store);
+
+        Assert.True(service.Provision("mock-b-01"));
+    }
+
     private static MockProvisioningService CreateService(BalloonMesh.Server.Data.DataStore store)
     {
         var fleet = new FleetService(store);

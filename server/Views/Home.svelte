@@ -84,6 +84,7 @@
   let selectedHistory = $state<HistorySample[]>([]);
   let showSteps = $state<ShowStep[]>([]);
   let onboarding = $state<MockDevice[]>([]);
+  let registering = $state<string[]>([]);
   let busy = $state(false);
 
   let map: any = null;
@@ -432,6 +433,8 @@
 
   async function provisionMock(id: string, groupId: number | null) {
     if (!model.canAdmin) return;
+    if (registering.includes(id)) return;
+    registering = [...registering, id];
     try {
       await api(`/api/onboarding/mock/${id}/provision`, {
         method: 'POST',
@@ -440,6 +443,8 @@
       await fetchOnboarding();
     } catch (error) {
       addLog(`Mock registration: ${(error as Error).message}`);
+    } finally {
+      registering = registering.filter((item) => item !== id);
     }
   }
 
@@ -834,7 +839,9 @@
                     class:sent={device.state === 'provisioning'}>{device.state}</span>
               {#if device.state === 'unprovisioned' || device.state === 'failed'}
                 <button class="mini" onclick={() => provisionMock(device.id, device.groupId)}
-                        disabled={device.kind === 'balloon' && device.groupId == null}>Register</button>
+                        disabled={registering.includes(device.id) || (device.kind === 'balloon' && device.groupId == null)}>
+                  {registering.includes(device.id) ? 'Registering…' : 'Register'}
+                </button>
               {/if}
             </li>
             {#if device.state === 'provisioning'}

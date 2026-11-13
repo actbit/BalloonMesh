@@ -242,13 +242,39 @@ app.MapGet("/api/onboarding/mock", (MockProvisioningService service) =>
     Results.Ok(service.Snapshot())).RequireAuthorization(AuthRoles.Admin);
 
 app.MapPost("/api/onboarding/mock/{id}/provision",
-    (string id, ProvisionDeviceRequest request, MockProvisioningService service) =>
-    service.Provision(id, request.GroupId)
-        ? Results.Accepted(value: new { id, state = "provisioning" })
-        : Results.BadRequest(new
+    async (string id, HttpRequest httpRequest, MockProvisioningService service) =>
+    {
+        var hasBody = httpRequest.ContentLength is > 0;
+        ProvisionDeviceRequest? request = null;
+        if (hasBody)
         {
-            error = "Unknown device, invalid group, or already provisioning/provisioned."
-        }))
+            try
+            {
+                request = await httpRequest.ReadFromJsonAsync<ProvisionDeviceRequest>();
+            }
+            catch (JsonException)
+            {
+                return Results.BadRequest(new { error = "The request body must be valid JSON." });
+            }
+
+            if (request is null)
+            {
+                return Results.BadRequest(new { error = "The request body is required when provided." });
+            }
+        }
+
+        // A body-less call is retained for existing mock clients. The Web UI
+        // always sends a body for balloons so group validation is enforced.
+        var accepted = hasBody
+            ? service.Provision(id, request!.GroupId)
+            : service.Provision(id);
+        return accepted
+            ? Results.Accepted(value: new { id, state = "provisioning" })
+            : Results.BadRequest(new
+            {
+                error = "Unknown device, invalid group, or already provisioning/provisioned."
+            });
+    })
     .RequireAuthorization(AuthRoles.Admin);
 
 app.MapPost("/api/onboarding/mock/reset", (MockProvisioningService service) =>
