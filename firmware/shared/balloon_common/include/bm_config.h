@@ -35,11 +35,17 @@
 /* Provisioning identity (PB-ADV/PB-GATT) is generated per device from the
  * Bluetooth MAC by bm_device_uuid(); do not hard-code a shared UUID here. */
 
-/* Development auto-provisioning requires an explicit address per device.
- * Production firmware uses the address assigned by normal provisioning. */
+/* Optional development address override.  Zero derives a stable address from
+ * the device Bluetooth MAC instead of requiring per-device build flags. */
 #ifndef BM_DEV_UNICAST_ADDR
 #define BM_DEV_UNICAST_ADDR 0u
 #endif
+
+/* Separate development ranges keep gateway and balloon addresses apart. */
+#define BM_DEV_BALLOON_ADDR_MIN 0x0100u
+#define BM_DEV_BALLOON_ADDR_MAX 0x3FFFu
+#define BM_DEV_GATEWAY_ADDR_MIN 0x4000u
+#define BM_DEV_GATEWAY_ADDR_MAX 0x7FFFu
 
 /* XIAO ESP32C3 BOOT button.  The button is active-low and is checked after
  * normal application startup, not while the ROM bootloader samples straps. */

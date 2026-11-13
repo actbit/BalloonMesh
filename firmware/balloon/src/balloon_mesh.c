@@ -613,10 +613,12 @@ void bm_balloon_mesh_init(void) {
 
     ESP_LOGI(TAG, "step 10: auto prov");
 #if defined(BM_DEV_AUTO_PROV) && BM_DEV_AUTO_PROV
-#if BM_DEV_UNICAST_ADDR == 0
-#error "BM_DEV_UNICAST_ADDR must be set for BM_DEV_AUTO_PROV"
-#endif
-    int auto_err = bm_dev_auto_provision(BM_DEV_UNICAST_ADDR, BM_GROUP_BALLOON);
+    uint16_t auto_addr = BM_DEV_UNICAST_ADDR != 0
+                             ? BM_DEV_UNICAST_ADDR
+                             : bm_device_unicast_addr(BM_DEV_BALLOON_ADDR_MIN,
+                                                      BM_DEV_BALLOON_ADDR_MAX);
+    ESP_LOGI(TAG, "development auto-provision address=0x%04x", auto_addr);
+    int auto_err = bm_dev_auto_provision(auto_addr, BM_GROUP_BALLOON);
     if (auto_err == 0) {
         state_lock();
         xEventGroupSetBits(s_state_events,
