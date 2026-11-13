@@ -32,8 +32,8 @@ void setup() {
     esp_log_level_set("*", ESP_LOG_INFO);
     ESP_LOGI(TAG, "BalloonMesh balloon firmware %s starting...", BM_FIRMWARE_VERSION);
 
-#if defined(BM_DEV_AUTO_PROV) && BM_DEV_AUTO_PROV
-    ESP_LOGW(TAG, "BM_DEV_AUTO_PROV enabled: erasing NVS");
+#if defined(BM_DEV_AUTO_PROV_RESET_NVS) && BM_DEV_AUTO_PROV_RESET_NVS
+    ESP_LOGW(TAG, "BM_DEV_AUTO_PROV_RESET_NVS enabled: erasing NVS");
     ESP_ERROR_CHECK(nvs_flash_erase());
 #endif
 

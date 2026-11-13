@@ -85,7 +85,7 @@ static bool send_hello(void) {
              "{\"type\":\"hello\",\"gatewayId\":\"%s\",\"firmware\":\"%s\","
              "\"token\":\"%s\",\"provisioned\":%s,\"spoolPending\":%u}",
              BM_GATEWAY_ID, BM_FIRMWARE_VERSION, BM_GATEWAY_TOKEN,
-             "true",
+             bm_gateway_mesh_is_ready() ? "true" : "false",
              (unsigned)bm_gateway_spool_count());
     return esp_websocket_client_send_text(s_client, hello, (int)strlen(hello),
                                           pdMS_TO_TICKS(3000)) >= 0;

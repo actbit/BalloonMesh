@@ -74,7 +74,7 @@ balloon は XIAO ESP32C3 の **D0/D1/D2 (GPIO2/3/4)** を **LEDC 5kHz / 8bit** �
   - LED GPIO
   - Group Address / Model ID / Company ID
 - `balloon` 環境は通常ファームウェアとして `BM_ENABLE_POSITIONING=1`（Protocol A / FTM有効）でビルドする。
-- `balloon-mesh-bringup` 環境は `BM_ENABLE_POSITIONING=0`（Wi-Fi/FTM無効）で、BLE Meshだけを確認するときに使う。
+- `balloon-mesh-bringup` 環境は `BM_ENABLE_POSITIONING=0`（Wi-Fi/FTM無効）で、BLE Meshだけを確認するときに使う。開発用自動provisioningとNVS消去も有効になるため、複数台で使う場合は `BM_DEV_UNICAST_ADDR` を個体ごとに変更する。
 
 ### anchor
 - `platformio.ini` の `-DBM_ANCHOR_ID=N`
@@ -83,6 +83,7 @@ balloon は XIAO ESP32C3 の **D0/D1/D2 (GPIO2/3/4)** を **LEDC 5kHz / 8bit** �
 ### gateway
 - `platformio.ini` の `BM_GATEWAY_USE_WEBSOCKET=1`（既定）
   - `0` にすると HTTP ポーリングへ切り替え
+- `gateway-dev` 環境は開発用自動provisioningを有効にする。通常の `gateway` 環境では保存済みのprovisioning情報を使用する。
 - `bm_config.h` の `BM_GATEWAY_ID` / `BM_SERVER_URL` / Wi-Fi 設定
 - WSS/HTTPS の CA は `-DBM_TLS_CA_CERT=\"...\"` で指定
 

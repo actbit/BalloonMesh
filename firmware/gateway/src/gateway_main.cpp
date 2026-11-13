@@ -293,8 +293,8 @@ void setup() {
     Serial.println("[GW] setup starting...");
     Serial.flush();
 
-#if defined(BM_DEV_AUTO_PROV) && BM_DEV_AUTO_PROV
-    Serial.println("[GW] BM_DEV_AUTO_PROV enabled: erasing NVS");
+#if defined(BM_DEV_AUTO_PROV_RESET_NVS) && BM_DEV_AUTO_PROV_RESET_NVS
+    Serial.println("[GW] BM_DEV_AUTO_PROV_RESET_NVS enabled: erasing NVS");
     ESP_ERROR_CHECK(nvs_flash_erase());
 #endif
 
@@ -307,16 +307,6 @@ void setup() {
     Serial.println("[GW] NVS initialized");
     Serial.flush();
 
-    xTaskCreate(wifi_task, "gateway_wifi", 4096, NULL, 5, NULL);
-    Serial.println("[GW] wifi_task started");
-    Serial.flush();
-
-#if defined(BM_GATEWAY_USE_WEBSOCKET) && BM_GATEWAY_USE_WEBSOCKET
-    bm_gateway_ws_start();
-    Serial.println("[GW] websocket started");
-    Serial.flush();
-#endif
-
     bm_gateway_spool_init();
     Serial.println("[GW] spool initialized");
     Serial.flush();
@@ -326,6 +316,21 @@ void setup() {
     bm_gateway_mesh_init();
     Serial.println("[GW] mesh initialized");
     Serial.flush();
+
+    xTaskCreate(wifi_task, "gateway_wifi", 4096, NULL, 5, NULL);
+    Serial.println("[GW] wifi_task started");
+    Serial.flush();
+
+#if defined(BM_GATEWAY_USE_WEBSOCKET) && BM_GATEWAY_USE_WEBSOCKET
+    bm_gateway_ws_start();
+    Serial.println("[GW] websocket started");
+    Serial.flush();
+#else
+    xTaskCreate(upload_events_task, "gateway_upload", 6144, NULL, 4, NULL);
+    xTaskCreate(poll_commands_task, "gateway_poll", 8192, NULL, 4, NULL);
+    Serial.println("[GW] HTTP transport tasks started");
+    Serial.flush();
+#endif
 }
 
 void loop() {

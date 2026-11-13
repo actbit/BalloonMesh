@@ -588,7 +588,10 @@ void bm_gateway_mesh_init(void) {
 
     ESP_LOGI(TAG, "step 10: auto prov");
 #if defined(BM_DEV_AUTO_PROV) && BM_DEV_AUTO_PROV
-    int auto_err = bm_dev_auto_provision(0x0001, BM_GROUP_GATEWAY);
+#if BM_DEV_UNICAST_ADDR == 0
+#error "BM_DEV_UNICAST_ADDR must be set for BM_DEV_AUTO_PROV"
+#endif
+    int auto_err = bm_dev_auto_provision(BM_DEV_UNICAST_ADDR, BM_GROUP_GATEWAY);
     if (auto_err == 0) {
         state_lock();
         xEventGroupSetBits(s_state_events,

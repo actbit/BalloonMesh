@@ -35,6 +35,12 @@
 /* Provisioning identity (PB-ADV/PB-GATT) is generated per device from the
  * Bluetooth MAC by bm_device_uuid(); do not hard-code a shared UUID here. */
 
+/* Development auto-provisioning requires an explicit address per device.
+ * Production firmware uses the address assigned by normal provisioning. */
+#ifndef BM_DEV_UNICAST_ADDR
+#define BM_DEV_UNICAST_ADDR 0u
+#endif
+
 /* Anchor SoftAP and Protocol A. */
 #define BM_ANCHOR_SSID_PREFIX "BM-ANCHOR-"
 #define BM_ANCHOR_WIFI_PASSWORD "balloonmesh"
