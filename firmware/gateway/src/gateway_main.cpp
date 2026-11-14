@@ -180,18 +180,19 @@ static bool request_gateway_mesh_address(GatewayMeshConfig *config) {
     }
     cJSON *range_start = cJSON_GetObjectItem(root, "rangeStart");
     cJSON *range_end = cJSON_GetObjectItem(root, "rangeEnd");
-    if (cJSON_IsNumber(range_start) && cJSON_IsNumber(range_end) &&
-        range_start->valueint >= BM_DEV_BALLOON_ADDR_MIN &&
-        range_end->valueint <= BM_DEV_BALLOON_ADDR_MAX &&
-        range_start->valueint <= range_end->valueint) {
+    bool range_valid = cJSON_IsNumber(range_start) && cJSON_IsNumber(range_end) &&
+                       range_start->valueint >= BM_DEV_BALLOON_ADDR_MIN &&
+                       range_end->valueint <= BM_DEV_BALLOON_ADDR_MAX &&
+                       range_start->valueint <= range_end->valueint;
+    if (range_valid) {
         config->node_range_start = (uint16_t)range_start->valueint;
         config->node_range_end = (uint16_t)range_end->valueint;
     }
     cJSON_Delete(root);
-    if (!valid) {
+    if (!valid || !range_valid) {
         ESP_LOGW(TAG, "gateway Mesh address response was invalid");
     }
-    return valid;
+    return valid && range_valid;
 }
 
 #if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER
@@ -508,6 +509,56 @@ static void wifi_task(void *argument) {
     }
 }
 
+static void start_gateway_transport_tasks(void) {
+#if defined(BM_GATEWAY_USE_WEBSOCKET) && BM_GATEWAY_USE_WEBSOCKET
+    bm_gateway_ws_start();
+    Serial.println("[GW] websocket started");
+    Serial.flush();
+#else
+    xTaskCreate(upload_events_task, "gateway_upload", 6144, NULL, 4, NULL);
+    xTaskCreate(poll_commands_task, "gateway_poll", 8192, NULL, 4, NULL);
+    Serial.println("[GW] HTTP transport tasks started");
+    Serial.flush();
+#endif
+}
+
+#if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER
+static void start_gateway_runtime_tasks(void) {
+    xTaskCreate(provisioner_task, "gateway_provision", 6144, NULL, 5, NULL);
+    Serial.println("[GW] provisioner task started");
+    Serial.flush();
+
+    xTaskCreate(wifi_task, "gateway_wifi", 4096, NULL, 5, NULL);
+    Serial.println("[GW] wifi_task started");
+    Serial.flush();
+
+    start_gateway_transport_tasks();
+}
+
+static void mesh_bootstrap_task(void *argument) {
+    (void)argument;
+    for (;;) {
+        GatewayMeshConfig mesh_config;
+        if (connect_wifi_once() && request_gateway_mesh_address(&mesh_config)) {
+            Serial.println("[GW] central gateway Mesh allocation received");
+            Serial.flush();
+            bm_gateway_mesh_init(mesh_config.mesh_address,
+                                 mesh_config.mesh_address,
+                                 mesh_config.node_range_start,
+                                 mesh_config.node_range_end);
+            Serial.println("[GW] mesh initialized");
+            Serial.flush();
+            start_gateway_runtime_tasks();
+            vTaskDelete(NULL);
+            return;
+        }
+
+        ESP_LOGW(TAG, "central gateway Mesh allocation unavailable; retrying in 10s");
+        vTaskDelay(pdMS_TO_TICKS(10000));
+    }
+}
+#endif
+
 void setup() {
     Serial.begin(115200);
     delay(500);
@@ -543,6 +594,15 @@ void setup() {
     Serial.println("[GW] spool initialized");
     Serial.flush();
 
+#if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER
+    s_unprovisioned_queue = xQueueCreateStatic(
+        4, sizeof(UnprovisionedDevice), s_unprovisioned_queue_buffer,
+        &s_unprovisioned_queue_storage);
+    prepare_wifi();
+    xTaskCreate(mesh_bootstrap_task, "gateway_mesh_boot", 6144, NULL, 5, NULL);
+    Serial.println("[GW] mesh bootstrap task started");
+    Serial.flush();
+#else
     GatewayMeshConfig mesh_config;
     uint16_t development_address = 0;
     prepare_wifi();
@@ -550,15 +610,6 @@ void setup() {
         (void)request_gateway_mesh_address(&mesh_config);
         development_address = mesh_config.mesh_address;
     }
-    if (mesh_config.mesh_address == 0) {
-        ESP_LOGE(TAG, "central gateway Mesh address unavailable; Provisioner will not start");
-    }
-
-#if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER
-    s_unprovisioned_queue = xQueueCreateStatic(
-        4, sizeof(UnprovisionedDevice), s_unprovisioned_queue_buffer,
-        &s_unprovisioned_queue_storage);
-#endif
 
     Serial.println("[GW] calling bm_gateway_mesh_init...");
     Serial.flush();
@@ -569,25 +620,11 @@ void setup() {
     Serial.println("[GW] mesh initialized");
     Serial.flush();
 
-#if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER
-    xTaskCreate(provisioner_task, "gateway_provision", 6144, NULL, 5, NULL);
-    Serial.println("[GW] provisioner task started");
-    Serial.flush();
-#endif
-
     xTaskCreate(wifi_task, "gateway_wifi", 4096, NULL, 5, NULL);
     Serial.println("[GW] wifi_task started");
     Serial.flush();
 
-#if defined(BM_GATEWAY_USE_WEBSOCKET) && BM_GATEWAY_USE_WEBSOCKET
-    bm_gateway_ws_start();
-    Serial.println("[GW] websocket started");
-    Serial.flush();
-#else
-    xTaskCreate(upload_events_task, "gateway_upload", 6144, NULL, 4, NULL);
-    xTaskCreate(poll_commands_task, "gateway_poll", 8192, NULL, 4, NULL);
-    Serial.println("[GW] HTTP transport tasks started");
-    Serial.flush();
+    start_gateway_transport_tasks();
 #endif
 }
 

@@ -46,6 +46,7 @@ public sealed class GatewayMeshIdentityTests
 
         Assert.Equal(64, firstGatewayFirst.RangeEnd - firstGatewayFirst.RangeStart + 1);
         Assert.Equal(64, secondGatewayFirst.RangeEnd - secondGatewayFirst.RangeStart + 1);
+        Assert.True(firstGatewayFirst.RangeStart > 0x0132);
         Assert.True(firstGatewayFirst.RangeEnd < secondGatewayFirst.RangeStart);
 
         GatewayMeshNodeIdentityRecord? last = null;

@@ -32,6 +32,7 @@ static const char *TAG = "gateway-mesh";
 #define BM_MESH_STATE_TELEMETRY_BOUND BIT2
 #define BM_MESH_STATE_BINDING BIT3
 #define BM_BIND_RETRY_MAX_ATTEMPTS 8
+#define BM_CONFIG_RETRY_MAX_ATTEMPTS 8
 
 static uint8_t s_prov_uuid[16];
 static StaticEventGroup_t s_state_events_storage;
@@ -347,8 +348,53 @@ static void configure_vendor_models(void) {
 static uint16_t s_config_target_addr = ESP_BLE_MESH_ADDR_UNASSIGNED;
 static uint8_t s_config_step;
 static bool s_provisioner_ready;
+static esp_timer_handle_t s_config_retry_timer;
+static uint32_t s_config_retry_delay_ms = 1000;
+static uint8_t s_config_retry_attempts;
 
 static void provisioner_configure_next(void);
+
+static void stop_provisioner_config_retry(void) {
+    if (s_config_retry_timer != NULL) {
+        esp_err_t err = esp_timer_stop(s_config_retry_timer);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "stopping remote config retry failed: %s", esp_err_to_name(err));
+        }
+    }
+}
+
+static void reset_provisioner_config_retry(void) {
+    stop_provisioner_config_retry();
+    s_config_retry_delay_ms = 1000;
+    s_config_retry_attempts = 0;
+}
+
+static void schedule_provisioner_config_retry(void) {
+    if (s_config_retry_timer == NULL ||
+        s_config_target_addr == ESP_BLE_MESH_ADDR_UNASSIGNED) {
+        return;
+    }
+    uint32_t delay_ms = s_config_retry_delay_ms == 0 ? 1000 : s_config_retry_delay_ms;
+    if (s_config_retry_attempts < BM_CONFIG_RETRY_MAX_ATTEMPTS) {
+        s_config_retry_delay_ms = delay_ms < 30000 ? delay_ms * 2 : 30000;
+        s_config_retry_attempts++;
+    } else {
+        delay_ms = 30000;
+    }
+    (void)esp_timer_stop(s_config_retry_timer);
+    esp_err_t err = esp_timer_start_once(s_config_retry_timer,
+                                         (uint64_t)delay_ms * 1000);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "scheduling remote config retry failed: %s", esp_err_to_name(err));
+    }
+}
+
+static void config_retry_timer_cb(void *arg) {
+    (void)arg;
+    if (s_config_target_addr != ESP_BLE_MESH_ADDR_UNASSIGNED) {
+        provisioner_configure_next();
+    }
+}
 
 static void provisioner_bind_local_models(void) {
     const uint16_t model_ids[] = {
@@ -459,6 +505,12 @@ static void config_client_set_common(esp_ble_mesh_client_common_param_t *common,
     common->msg_role = ROLE_PROVISIONER;
 }
 
+static bool remote_config_status_succeeded(uint32_t opcode, uint8_t status) {
+    return status == ESP_BLE_MESH_CFG_STATUS_SUCCESS ||
+           (opcode == ESP_BLE_MESH_MODEL_OP_APP_KEY_ADD &&
+            status == ESP_BLE_MESH_CFG_STATUS_KEY_INDEX_ALREADY_STORED);
+}
+
 static void provisioner_configure_next(void) {
     if (!s_provisioner_ready || s_config_target_addr == ESP_BLE_MESH_ADDR_UNASSIGNED) {
         return;
@@ -490,21 +542,37 @@ static void provisioner_configure_next(void) {
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "remote node configuration step %u failed: %s",
                  s_config_step, esp_err_to_name(err));
+        schedule_provisioner_config_retry();
     }
 }
 
 static void config_client_cb(esp_ble_mesh_cfg_client_cb_event_t event,
                              esp_ble_mesh_cfg_client_cb_param_t *param) {
-    if (param == NULL || param->params == NULL ||
-        s_config_target_addr == ESP_BLE_MESH_ADDR_UNASSIGNED) {
+    if (s_config_target_addr == ESP_BLE_MESH_ADDR_UNASSIGNED) {
+        return;
+    }
+    if (event == ESP_BLE_MESH_CFG_CLIENT_TIMEOUT_EVT) {
+        ESP_LOGW(TAG, "remote node configuration step %u timed out", s_config_step);
+        schedule_provisioner_config_retry();
+        return;
+    }
+    if (param == NULL) {
+        ESP_LOGW(TAG, "remote node configuration step %u returned without a callback",
+                 s_config_step);
+        schedule_provisioner_config_retry();
+        return;
+    }
+    if (param->params == NULL) {
+        ESP_LOGW(TAG, "remote node configuration step %u returned without parameters",
+                 s_config_step);
+        schedule_provisioner_config_retry();
         return;
     }
     uint32_t opcode = param->params->opcode;
-    if (event == ESP_BLE_MESH_CFG_CLIENT_TIMEOUT_EVT) {
-        provisioner_configure_next();
-        return;
-    }
     if (event != ESP_BLE_MESH_CFG_CLIENT_SET_STATE_EVT || param->error_code != ESP_OK) {
+        ESP_LOGW(TAG, "remote node configuration step %u returned error %d",
+                 s_config_step, param->error_code);
+        schedule_provisioner_config_retry();
         return;
     }
 
@@ -516,13 +584,19 @@ static void config_client_cb(esp_ble_mesh_cfg_client_cb_event_t event,
     } else {
         return;
     }
-    if (status != 0) {
+    if (!remote_config_status_succeeded(opcode, status)) {
         ESP_LOGW(TAG, "remote node configuration opcode 0x%04lx status=%u",
                  (unsigned long)opcode, status);
+        schedule_provisioner_config_retry();
+        return;
+    }
+    stop_provisioner_config_retry();
+    s_config_step++;
+    if (s_config_step > 3) {
+        reset_provisioner_config_retry();
         s_config_target_addr = ESP_BLE_MESH_ADDR_UNASSIGNED;
         return;
     }
-    s_config_step++;
     provisioner_configure_next();
 }
 
@@ -551,6 +625,7 @@ static void provisioner_prov_cb(esp_ble_mesh_prov_cb_event_t event,
             ESP_LOGI(TAG, "Provisioned node addr=0x%04x elements=%u",
                      param->provisioner_prov_complete.unicast_addr,
                      param->provisioner_prov_complete.element_num);
+            reset_provisioner_config_retry();
             s_config_target_addr = param->provisioner_prov_complete.unicast_addr;
             s_config_step = 1;
             provisioner_configure_next();
@@ -837,6 +912,16 @@ void bm_gateway_mesh_init(uint16_t development_address,
         .name = "bm_prov_retry",
     };
     ESP_ERROR_CHECK(esp_timer_create(&prov_retry_args, &s_prov_retry_timer));
+#if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER && \
+    defined(CONFIG_BLE_MESH_PROVISIONER) && CONFIG_BLE_MESH_PROVISIONER
+    const esp_timer_create_args_t config_retry_args = {
+        .callback = config_retry_timer_cb,
+        .arg = NULL,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "bm_config_retry",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&config_retry_args, &s_config_retry_timer));
+#endif
     ESP_LOGI(TAG, "step 3: bt controller init");
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));

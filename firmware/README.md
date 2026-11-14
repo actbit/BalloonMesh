@@ -89,7 +89,7 @@ balloon は XIAO ESP32C3 の **D0/D1/D2 (GPIO2/3/4)** を **LEDC 5kHz / 8bit** �
 
 BOOTを押したままリセットするとESP32-C3のROM書き込みモードに入るため、NVS消去は通常起動後に実行する。
 
-MeshアドレスはGateway自身が `0x0001-0x00FF`、バルーンなどのノードが `0x0100-0x3FFF` を使う。Gateway自身のアドレスとノード範囲はサーバーの台帳で個体ごとに安定して予約され、複数Gatewayの範囲は重複しない。同じProvisioning UUIDを2台が検出した場合は先に取得したGatewayだけがProvisioningし、もう一方はサーバーの競合応答で処理を中止する。
+MeshアドレスはGateway自身が `0x0001-0x00FF`、バルーンなどのノードが `0x0100-0x3FFF` を使う。Gateway自身のアドレスとノード範囲はサーバーの台帳で個体ごとに安定して予約され、複数Gatewayの範囲は重複しない。サーバーに既登録のバルーンアドレスも範囲予約から除外される。同じProvisioning UUIDを2台が検出した場合は先に取得したGatewayだけがProvisioningし、もう一方はサーバーの競合応答で処理を中止する。
 
 ## 追加実装
 

@@ -316,7 +316,7 @@ public sealed class DataStore
                     {
                         var existingGatewayId = reader.GetString(0);
                         var existingDeviceUuid = reader.GetString(1);
-                        var existingAddress = (ushort)reader.GetInt32(2);
+                        var existingAddress = reader.GetInt32(2);
                         if (!string.Equals(existingGatewayId, gatewayId, StringComparison.Ordinal) ||
                             !string.Equals(existingDeviceUuid, deviceUuid, StringComparison.Ordinal))
                         {
@@ -324,8 +324,26 @@ public sealed class DataStore
                                 "Gateway ID and device UUID are already assigned to different devices.");
                         }
 
+                        reader.Close();
+                        if (existingAddress < GatewayAddressMin || existingAddress > GatewayAddressMax)
+                        {
+                            var migratedAddress = FindAvailableGatewayAddress(connection, transaction);
+                            using var migrate = connection.CreateCommand();
+                            migrate.Transaction = transaction;
+                            migrate.CommandText = """
+                                UPDATE gateway_mesh_addresses
+                                SET mesh_address = @mesh_address, updated_at = @updated_at
+                                WHERE gateway_id = @gateway_id;
+                                """;
+                            migrate.Parameters.AddWithValue("mesh_address", migratedAddress);
+                            migrate.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
+                            migrate.Parameters.AddWithValue("gateway_id", gatewayId);
+                            migrate.ExecuteNonQuery();
+                            existingAddress = migratedAddress;
+                        }
+
                         existingIdentity = new GatewayMeshIdentityRecord(
-                            existingGatewayId, existingDeviceUuid, existingAddress);
+                            existingGatewayId, existingDeviceUuid, (ushort)existingAddress);
                     }
                 }
             }
@@ -336,34 +354,7 @@ public sealed class DataStore
                 return existingIdentity;
             }
 
-            var address = GatewayAddressMin;
-            using (var used = connection.CreateCommand())
-            {
-                used.Transaction = transaction;
-                used.CommandText = """
-                    SELECT mesh_address
-                    FROM gateway_mesh_addresses
-                    ORDER BY mesh_address;
-                    """;
-                using var reader = used.ExecuteReader();
-                while (reader.Read())
-                {
-                    var usedAddress = reader.GetInt32(0);
-                    if (usedAddress == address)
-                    {
-                        address++;
-                    }
-                    else if (usedAddress > address)
-                    {
-                        break;
-                    }
-                }
-            }
-
-            if (address > GatewayAddressMax)
-            {
-                throw new InvalidOperationException("No gateway Mesh address is available.");
-            }
+            var address = FindAvailableGatewayAddress(connection, transaction);
 
             using (var insert = connection.CreateCommand())
             {
@@ -414,7 +405,7 @@ public sealed class DataStore
             using (var tableLock = connection.CreateCommand())
             {
                 tableLock.Transaction = transaction;
-                tableLock.CommandText = "LOCK TABLE gateway_mesh_address_ranges, gateway_mesh_node_addresses IN EXCLUSIVE MODE";
+                tableLock.CommandText = "LOCK TABLE gateway_mesh_address_ranges, gateway_mesh_node_addresses, balloons IN EXCLUSIVE MODE";
                 tableLock.ExecuteNonQuery();
             }
 
@@ -512,7 +503,7 @@ public sealed class DataStore
             using (var tableLock = connection.CreateCommand())
             {
                 tableLock.Transaction = transaction;
-                tableLock.CommandText = "LOCK TABLE gateway_mesh_address_ranges IN EXCLUSIVE MODE";
+                tableLock.CommandText = "LOCK TABLE gateway_mesh_address_ranges, balloons IN EXCLUSIVE MODE";
                 tableLock.ExecuteNonQuery();
             }
 
@@ -656,8 +647,14 @@ public sealed class DataStore
             used.CommandText = """
                 SELECT range_start, range_end
                 FROM gateway_mesh_address_ranges
-                ORDER BY range_start;
+                UNION ALL
+                SELECT mesh_address, mesh_address
+                FROM balloons
+                WHERE mesh_address BETWEEN @min_address AND @max_address
+                ORDER BY 1, 2;
                 """;
+            used.Parameters.AddWithValue("min_address", MeshNodeAddressMin);
+            used.Parameters.AddWithValue("max_address", MeshNodeAddressMax);
             using var reader = used.ExecuteReader();
             while (reader.Read())
             {
@@ -694,6 +691,41 @@ public sealed class DataStore
         insert.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
         var id = (long)insert.ExecuteScalar()!;
         return new MeshAddressRange(id, start, start + size - 1, start);
+    }
+
+    private static int FindAvailableGatewayAddress(
+        NpgsqlConnection connection, NpgsqlTransaction transaction)
+    {
+        var address = GatewayAddressMin;
+        using var used = connection.CreateCommand();
+        used.Transaction = transaction;
+        used.CommandText = """
+            SELECT mesh_address
+            FROM gateway_mesh_addresses
+            WHERE mesh_address BETWEEN @min_address AND @max_address
+            ORDER BY mesh_address;
+            """;
+        used.Parameters.AddWithValue("min_address", GatewayAddressMin);
+        used.Parameters.AddWithValue("max_address", GatewayAddressMax);
+        using var reader = used.ExecuteReader();
+        while (reader.Read())
+        {
+            var usedAddress = reader.GetInt32(0);
+            if (usedAddress == address)
+            {
+                address++;
+            }
+            else if (usedAddress > address)
+            {
+                break;
+            }
+        }
+
+        if (address > GatewayAddressMax)
+        {
+            throw new InvalidOperationException("No gateway Mesh address is available.");
+        }
+        return address;
     }
 
     private static void Seed(NpgsqlConnection connection)

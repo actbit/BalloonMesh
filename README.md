@@ -288,7 +288,7 @@ dotnet run --project server/BalloonMesh.Server.csproj --urls http://localhost:50
 - `POST /api/onboarding/mock/reset` — 初期状態へ戻す
 - SignalR `onboardingUpdated` で接続中の全クライアントに反映（REST API は Admin のみ）
 
-実機の割り当てはサーバーが一元管理します。`POST /api/gateway/{id}/mesh-address` でGateway自身のユニキャストアドレスとノード範囲を払い出し、`POST /api/gateway/{id}/mesh-node-address` でUUIDごとの安定したノードアドレスを払い出します。各Gatewayは最初に64アドレス、使い切ると16アドレスずつ追加され、複数Gateway間で範囲は重複しません。同じUUIDを別Gatewayが先に取得済みならHTTP 409となり、二重Provisioningを防ぎます。
+実機の割り当てはサーバーが一元管理します。`POST /api/gateway/{id}/mesh-address` でGateway自身のユニキャストアドレスとノード範囲を払い出し、`POST /api/gateway/{id}/mesh-node-address` でUUIDごとの安定したノードアドレスを払い出します。各Gatewayは最初に64アドレス、使い切ると16アドレスずつ追加され、複数Gateway間で範囲は重複しません。既存の `balloons` 台帳に登録済みのMeshアドレスも予約範囲から除外します。同じUUIDを別Gatewayが先に取得済みならHTTP 409となり、二重Provisioningを防ぎます。
 
 Web UI のGatewayパネルでは、Gatewayアドレス、払い出し済み範囲、範囲ごとの使用数を確認できます。
 
