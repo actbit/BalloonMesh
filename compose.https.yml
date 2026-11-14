@@ -1,0 +1,26 @@
+services:
+  server:
+    # The application is reachable from Caddy over the Compose network only.
+    ports: !reset []
+    expose:
+      - "5080"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      PUBLIC_DOMAIN: "${PUBLIC_DOMAIN:?Set PUBLIC_DOMAIN to the HTTPS hostname}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      server:
+        condition: service_started
+
+volumes:
+  caddy_data:
+  caddy_config:

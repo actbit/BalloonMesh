@@ -13,6 +13,29 @@ BalloonMesh は、常時接続 WebSocket (`/ws/gateway`, `/hubs/monitor`)、高�
   * `aws configure` 等で認証情報が設定されていること
 * **SSH** および **rsync**（macOS / Linux 標準）
 * **SSH 秘密鍵**（`~/.ssh/id_rsa`, `~/.ssh/id_ed25519` 等）
+* HTTPSで利用する**公開ドメイン**（例: `mesh.example.com`）
+
+### HTTPSの前提
+
+Lightsailインスタンス上では、CaddyがTLSを終端し、次の経路でアプリケーションへ転送します。
+
+```text
+https://mesh.example.com (80/443) -> Caddy -> server:5080
+```
+
+`compose.https.yml` はアプリケーションの `5080` をホストへ公開せず、画面・API・SignalR・Gateway WebSocketを同じHTTPSドメインで処理します。CaddyがLet's Encryptの証明書を自動取得・更新します。
+
+デプロイ時にインスタンスへ静的IPがなければ、`<INSTANCE_NAME>-ip` という名前で作成して割り当てます。DNSプロバイダー側で、次のAレコードを設定してください。
+
+```text
+mesh.example.com.  A  <Lightsailの静的IP>
+```
+
+静的IPはインスタンスの停止・起動後も変わりません。インスタンスを削除して作り直す場合は、残した静的IPを新しいインスタンスへ再アタッチします。
+
+### ファイアウォールについて
+
+`scripts/lightsail-deploy.sh` は、別セッションや環境側で管理しているLightsailのファイアウォール/CIDR設定を変更しません。HTTPSを公開する時点で、環境側でTCP `80` と `443` が許可されている必要があります。既存の `5080` ルールもこのスクリプトからは変更しませんが、HTTPS構成ではアプリケーションコンテナの `5080` はホストへバインドされません。
 
 ### 必要最小限の AWS IAM 権限
 AWS 公式には Lightsail 専用の事前定義マネージドポリシーが存在しないため、デプロイを実行する IAM ユーザーに以下の **インラインポリシー（またはカスタムポリシー）** を付与してください：
@@ -36,41 +59,57 @@ AWS 公式には Lightsail 専用の事前定義マネージドポリシーが�
 
 ## 2. デプロイの実行
 
-リポジトリルートから以下のスクリプトを実行します。  
-**Lightsail インスタンスが存在しない場合は自動新規作成（ポート開放・初回デプロイ含む）され、既に存在する場合は差分のみを高速反映**します。
+リポジトリルートから以下のスクリプトを実行します。Lightsailインスタンスが存在しない場合は自動新規作成され、既に存在する場合は差分のみを反映します。スクリプトはファイアウォールを変更しないため、先にDNSと80/443の許可を準備してください。
 
 ### デモモード（デフォルト）
 実機ハードウェアが手元にない状態で、仮想の 50 台バルーンをシミュレーション稼働させます：
 ```bash
-./scripts/lightsail-deploy.sh
+./scripts/lightsail-deploy.sh --domain mesh.example.com
 ```
 
 ### 本番・実機接続モード
 シミュレーションを停止し、物理 ESP32 Gateway からの接続待ち受け（本番稼働）状態で起動します：
 ```bash
-./scripts/lightsail-deploy.sh --prod
+./scripts/lightsail-deploy.sh --domain mesh.example.com --prod
 ```
 
 ### オプション一覧
 | オプション | 説明 | デフォルト値 |
 |---|---|---|
+| `--domain <DOMAIN>` | HTTPSで利用する公開ドメイン | 必須（`LIGHTSAIL_DOMAIN`でも指定可） |
 | `--demo` | デモモード（仮想バルーン50台シミュレーション） | 有効（デフォルト） |
 | `--prod` | 本番実機モード（シミュレーション停止、物理Gateway待受） | - |
 | `--bundle <ID>` | プラン指定（`small_3_0`: 2GB/$12/月, `micro_3_0`: 1GB/$7/月） | `small_3_0` |
 | `--key <PATH>` | SSH 秘密鍵パス | `~/.ssh/` 下の既存鍵を自動検出 |
 | `--token <TOKEN>` | 旧方式の全 Gateway 共通認証トークン | `GATEWAY_TOKEN` 環境変数または未設定 |
-| `--allow-cidr <CIDR>` | 5080ポート接続元の IP 制限（例: `219.104.138.249/32`） | 全開放 (`0.0.0.0/0`) |
 | `--name <NAME>` | Lightsail インスタンス名 | `balloonmesh-server` |
+
+デプロイ完了後のURLは `https://<DOMAIN>/`、Gateway WebSocketは `wss://<DOMAIN>/ws/gateway` です。ESP32 GatewayはHTTPS用環境を使い、同じHTTPSオリジンを指定してビルドします。
+
+```bash
+cd firmware/gateway
+BM_SERVER_URL="https://mesh.example.com" pio run -e gateway-https
+```
+
+実機Gatewayの証明書検証を有効にする場合は、既存の `BM_TLS_CA_CERT` も本番用CAバンドルとして指定してください。
 
 ---
 
 ## 3. インスタンスの破棄（課金停止）
 
-動作確認完了後、以下のスクリプトでインスタンス・ディスク・キーペアを完全消去し、課金を即座に停止できます：
+動作確認完了後、以下のスクリプトでインスタンス・ディスク・キーペアを消去できます。静的IPは、同じIPを再利用できるようデフォルトでは保持します。
 
 ```bash
 ./scripts/lightsail-destroy.sh
 ```
+
+静的IPも削除する場合は、明示的にオプションを付けます。
+
+```bash
+./scripts/lightsail-destroy.sh --delete-static-ip
+```
+
+インスタンスに割り当てていない静的IPには料金が発生するため、再利用しない場合は削除してください。
 
 ---
 

@@ -5,6 +5,7 @@ using BalloonMesh.Server.Data;
 using BalloonMesh.Server.Hubs;
 using BalloonMesh.Server.Models;
 using BalloonMesh.Server.Services;
+using Microsoft.AspNetCore.HttpOverrides;
 using SvelteSharp;
 using SvelteSharp.AspNetCore;
 using SvelteSharp.Jint;
@@ -13,6 +14,17 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Lightsail terminates TLS in Caddy and forwards the request to Kestrel over
+// the private Compose network.  Trust the proxy's scheme so secure cookies and
+// OAuth callback URLs are generated as https:// URLs.
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedProto;
+    options.ForwardLimit = 1;
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+});
 
 builder.Services
     .AddSignalR()
@@ -85,6 +97,7 @@ if (string.IsNullOrWhiteSpace(GatewayAuth.ConfiguredToken(app.Configuration)) &&
         "Gateway:AllowUnkeyedGateways is enabled without Gateway:Token; gateways without an issued API key are accepted unauthenticated.");
 }
 
+app.UseForwardedHeaders();
 app.UseWebSockets(new WebSocketOptions
 {
     KeepAliveInterval = TimeSpan.FromSeconds(30)

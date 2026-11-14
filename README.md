@@ -81,13 +81,13 @@ SIMULATION_ENABLED=false docker compose up -d --build
 常時接続 WebSocket (`/ws/gateway`, `/hubs/monitor`) や測位バッチ集約ワーカーが稼働するため、Vercel 等のサーバーレスではなく常時起動 VPS（Amazon Lightsail 等）でのホスティングを推奨します。手元から 1 コマンドで作成・更新・破棄ができるスクリプトを用意しています：
 
 ```bash
-# デプロイ（インスタンスが無ければ自動新規作成、既にあれば差分更新）
-./scripts/lightsail-deploy.sh
+# HTTPSデプロイ（インスタンスが無ければ自動新規作成、静的IPを割り当て、既にあれば差分更新）
+./scripts/lightsail-deploy.sh --domain mesh.example.com
 
 # 本番実機モード（シミュレーション停止、物理ESP32待受）でデプロイ
-./scripts/lightsail-deploy.sh --prod
+./scripts/lightsail-deploy.sh --domain mesh.example.com --prod
 
-# 破棄（インスタンス削除・課金停止）
+# 破棄（静的IPは再利用のため保持）
 ./scripts/lightsail-destroy.sh
 ```
 
