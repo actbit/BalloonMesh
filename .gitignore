@@ -37,3 +37,6 @@ scripts/watch_*.py
 .env.*
 !.env.example
 cookies.txt
+
+# Server CA for gateway TLS (deployment specific)
+firmware/shared/balloon_common/include/bm_server_ca.h

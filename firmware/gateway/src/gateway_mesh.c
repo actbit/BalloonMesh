@@ -1,6 +1,8 @@
 #include "gateway_mesh.h"
 
 #include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_bt.h"
@@ -345,54 +347,258 @@ static void configure_vendor_models(void) {
 #if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER && \
     defined(CONFIG_BLE_MESH_PROVISIONER) && CONFIG_BLE_MESH_PROVISIONER
 
-static uint16_t s_config_target_addr = ESP_BLE_MESH_ADDR_UNASSIGNED;
-static uint8_t s_config_step;
+/*
+ * Remote node configuration (AppKey Add + two Model App Binds) is tracked per
+ * node in a job table, keyed by the node's unicast address:
+ *
+ *  - every Config Client response is matched to its job by the source
+ *    address, so concurrent Provisioning completions can never send a step to
+ *    the wrong node (previously one global target/step was shared);
+ *  - exactly one Config Client message is in flight at a time, which keeps
+ *    the segmented-message buffers and the BLE/Wi-Fi coexistence load bounded;
+ *  - every failure (API error, timeout, error callback, non-success remote
+ *    status) reschedules the job with exponential backoff and the job is never
+ *    dropped, so a node can not stay "provisioned but unbound";
+ *  - on start-up every node already in the Provisioner's persisted node table
+ *    is re-enqueued.  All steps are idempotent (AppKey "already stored" counts
+ *    as success), so a reboot or power loss in the middle of configuration is
+ *    recovered without re-provisioning.
+ */
+#define BM_CONFIG_STEP_APP_KEY_ADD 1
+#define BM_CONFIG_STEP_BIND_CONTROL 2
+#define BM_CONFIG_STEP_BIND_TELEMETRY 3
+#define BM_CONFIG_STEP_DONE 4
+#define BM_CONFIG_RETRY_MIN_MS 1000u
+#define BM_CONFIG_RETRY_MAX_MS 30000u
+#define BM_CONFIG_RETRY_SLOW_MS 60000u
+#define BM_CONFIG_JOB_MAX CONFIG_BLE_MESH_MAX_PROV_NODES
+
+typedef struct {
+    uint16_t addr;          /* ESP_BLE_MESH_ADDR_UNASSIGNED = free slot */
+    uint8_t step;
+    uint8_t attempts;
+    uint32_t delay_ms;
+    int64_t due_us;
+} config_job_t;
+
+static config_job_t s_config_jobs[BM_CONFIG_JOB_MAX];
+static int s_config_active = -1;      /* job whose message is in flight */
+static StaticSemaphore_t s_config_lock_storage;
+static SemaphoreHandle_t s_config_lock;
 static bool s_provisioner_ready;
 static esp_timer_handle_t s_config_retry_timer;
-static uint32_t s_config_retry_delay_ms = 1000;
-static uint8_t s_config_retry_attempts;
 
-static void provisioner_configure_next(void);
+/* Provisioning link serialisation: set while no PB-ADV/PB-GATT link is open. */
+#define BM_PROV_LINK_IDLE BIT0
+static StaticEventGroup_t s_prov_link_events_storage;
+static EventGroupHandle_t s_prov_link_events;
 
-static void stop_provisioner_config_retry(void) {
-    if (s_config_retry_timer != NULL) {
-        esp_err_t err = esp_timer_stop(s_config_retry_timer);
-        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-            ESP_LOGW(TAG, "stopping remote config retry failed: %s", esp_err_to_name(err));
+/* Mesh network keys.  Production keys come from the server
+ * (bm_gateway_mesh_set_network_keys); development builds use the shared test
+ * keys so that BM_DEV_AUTO_PROV balloons can join the same network. */
+static uint8_t s_net_key[16];
+static uint8_t s_app_key[16];
+static bool s_keys_set;
+
+static void config_pump_locked(void);
+
+static void config_lock(void) {
+    if (s_config_lock != NULL) {
+        xSemaphoreTake(s_config_lock, portMAX_DELAY);
+    }
+}
+
+static void config_unlock(void) {
+    if (s_config_lock != NULL) {
+        xSemaphoreGive(s_config_lock);
+    }
+}
+
+static config_job_t *config_find_job(uint16_t addr) {
+    for (size_t i = 0; i < BM_CONFIG_JOB_MAX; ++i) {
+        if (s_config_jobs[i].addr == addr) {
+            return &s_config_jobs[i];
         }
     }
+    return NULL;
 }
 
-static void reset_provisioner_config_retry(void) {
-    stop_provisioner_config_retry();
-    s_config_retry_delay_ms = 1000;
-    s_config_retry_attempts = 0;
-}
-
-static void schedule_provisioner_config_retry(void) {
-    if (s_config_retry_timer == NULL ||
-        s_config_target_addr == ESP_BLE_MESH_ADDR_UNASSIGNED) {
+/* (Re)starts configuration of a node from the first step.  Called for a newly
+ * provisioned node and for every stored node at boot. */
+static void config_enqueue_locked(uint16_t addr) {
+    if (addr == ESP_BLE_MESH_ADDR_UNASSIGNED) {
         return;
     }
-    uint32_t delay_ms = s_config_retry_delay_ms == 0 ? 1000 : s_config_retry_delay_ms;
-    if (s_config_retry_attempts < BM_CONFIG_RETRY_MAX_ATTEMPTS) {
-        s_config_retry_delay_ms = delay_ms < 30000 ? delay_ms * 2 : 30000;
-        s_config_retry_attempts++;
-    } else {
-        delay_ms = 30000;
+    config_job_t *job = config_find_job(addr);
+    if (job == NULL) {
+        job = config_find_job(ESP_BLE_MESH_ADDR_UNASSIGNED);
+    }
+    if (job == NULL) {
+        /* The table is sized to the node table, so this cannot happen unless
+         * the node table itself is full. */
+        ESP_LOGE(TAG, "remote config job table full; node 0x%04x not configured", addr);
+        return;
+    }
+    int index = (int)(job - s_config_jobs);
+    if (index == s_config_active) {
+        /* A response for the old attempt may still arrive; it is ignored
+         * because the step is restarted below and matched by step too. */
+        s_config_active = -1;
+    }
+    job->addr = addr;
+    job->step = BM_CONFIG_STEP_APP_KEY_ADD;
+    job->attempts = 0;
+    job->delay_ms = BM_CONFIG_RETRY_MIN_MS;
+    job->due_us = esp_timer_get_time();
+}
+
+static void config_arm_timer_locked(void) {
+    if (s_config_retry_timer == NULL) {
+        return;
     }
     (void)esp_timer_stop(s_config_retry_timer);
-    esp_err_t err = esp_timer_start_once(s_config_retry_timer,
-                                         (uint64_t)delay_ms * 1000);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "scheduling remote config retry failed: %s", esp_err_to_name(err));
+    if (s_config_active >= 0) {
+        return;  /* the response/timeout callback re-pumps */
     }
+    int64_t now = esp_timer_get_time();
+    int64_t next = INT64_MAX;
+    for (size_t i = 0; i < BM_CONFIG_JOB_MAX; ++i) {
+        if (s_config_jobs[i].addr != ESP_BLE_MESH_ADDR_UNASSIGNED &&
+            s_config_jobs[i].due_us < next) {
+            next = s_config_jobs[i].due_us;
+        }
+    }
+    if (next == INT64_MAX) {
+        return;
+    }
+    int64_t wait_us = next > now ? next - now : 1000;
+    esp_err_t err = esp_timer_start_once(s_config_retry_timer, (uint64_t)wait_us);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "scheduling remote config failed: %s", esp_err_to_name(err));
+    }
+}
+
+static void config_job_failed_locked(config_job_t *job, const char *reason) {
+    uint32_t delay_ms = job->delay_ms == 0 ? BM_CONFIG_RETRY_MIN_MS : job->delay_ms;
+    if (job->attempts < BM_CONFIG_RETRY_MAX_ATTEMPTS) {
+        job->attempts++;
+        job->delay_ms = delay_ms < BM_CONFIG_RETRY_MAX_MS ? delay_ms * 2 : BM_CONFIG_RETRY_MAX_MS;
+    } else {
+        /* Keep trying forever, slowly: the node may be out of range or
+         * powered off and will be configured once it is back. */
+        delay_ms = BM_CONFIG_RETRY_SLOW_MS;
+    }
+    ESP_LOGW(TAG, "node 0x%04x config step %u failed (%s); retry in %lums (attempt %u)",
+             job->addr, job->step, reason, (unsigned long)delay_ms, job->attempts);
+    job->due_us = esp_timer_get_time() + (int64_t)delay_ms * 1000;
+    if (s_config_active == (int)(job - s_config_jobs)) {
+        s_config_active = -1;
+    }
+}
+
+static void config_job_succeeded_locked(config_job_t *job) {
+    if (s_config_active == (int)(job - s_config_jobs)) {
+        s_config_active = -1;
+    }
+    job->step++;
+    job->attempts = 0;
+    job->delay_ms = BM_CONFIG_RETRY_MIN_MS;
+    job->due_us = esp_timer_get_time();
+    if (job->step >= BM_CONFIG_STEP_DONE) {
+        ESP_LOGI(TAG, "node 0x%04x configured (AppKey + models bound)", job->addr);
+        memset(job, 0, sizeof(*job));
+        job->addr = ESP_BLE_MESH_ADDR_UNASSIGNED;
+    }
+}
+
+static void config_client_set_common(esp_ble_mesh_client_common_param_t *common,
+                                      uint32_t opcode, uint16_t addr) {
+    memset(common, 0, sizeof(*common));
+    common->opcode = opcode;
+    common->model = s_config_client.model;
+    common->ctx.net_idx = BM_NET_IDX;
+    common->ctx.app_idx = BM_APP_IDX;
+    common->ctx.addr = addr;
+    common->ctx.send_ttl = 7;
+    common->ctx.send_rel = false;
+    common->msg_timeout = 5000;
+    common->msg_role = ROLE_PROVISIONER;
+}
+
+static esp_err_t config_send_step(const config_job_t *job) {
+    esp_ble_mesh_client_common_param_t common;
+    esp_ble_mesh_cfg_client_set_state_t set_state = {0};
+    if (job->step == BM_CONFIG_STEP_APP_KEY_ADD) {
+        config_client_set_common(&common, ESP_BLE_MESH_MODEL_OP_APP_KEY_ADD, job->addr);
+        set_state.app_key_add.net_idx = BM_NET_IDX;
+        set_state.app_key_add.app_idx = BM_APP_IDX;
+        memcpy(set_state.app_key_add.app_key, s_app_key, sizeof(s_app_key));
+    } else {
+        config_client_set_common(&common, ESP_BLE_MESH_MODEL_OP_MODEL_APP_BIND, job->addr);
+        set_state.model_app_bind.element_addr = job->addr;
+        set_state.model_app_bind.model_app_idx = BM_APP_IDX;
+        set_state.model_app_bind.company_id = BM_COMPANY_ID_LOCAL;
+        set_state.model_app_bind.model_id = job->step == BM_CONFIG_STEP_BIND_CONTROL
+                                                ? BM_MODEL_ID_CONTROL
+                                                : BM_MODEL_ID_TELEMETRY;
+    }
+    return esp_ble_mesh_config_client_set_state(&common, &set_state);
+}
+
+/* Sends the next due step if nothing is in flight.  Must hold config_lock. */
+static void config_pump_locked(void) {
+    if (!s_provisioner_ready) {
+        return;
+    }
+    while (s_config_active < 0) {
+        int64_t now = esp_timer_get_time();
+        int best = -1;
+        for (size_t i = 0; i < BM_CONFIG_JOB_MAX; ++i) {
+            const config_job_t *job = &s_config_jobs[i];
+            if (job->addr == ESP_BLE_MESH_ADDR_UNASSIGNED || job->due_us > now) {
+                continue;
+            }
+            if (best < 0 || job->due_us < s_config_jobs[best].due_us) {
+                best = (int)i;
+            }
+        }
+        if (best < 0) {
+            break;
+        }
+        config_job_t *job = &s_config_jobs[best];
+        esp_err_t err = config_send_step(job);
+        if (err == ESP_OK) {
+            s_config_active = best;
+            break;
+        }
+        config_job_failed_locked(job, esp_err_to_name(err));
+    }
+    config_arm_timer_locked();
 }
 
 static void config_retry_timer_cb(void *arg) {
     (void)arg;
-    if (s_config_target_addr != ESP_BLE_MESH_ADDR_UNASSIGNED) {
-        provisioner_configure_next();
+    config_lock();
+    config_pump_locked();
+    config_unlock();
+}
+
+/* Re-enqueue every node the Provisioner already knows (persisted in NVS). */
+static void config_resync_stored_nodes_locked(void) {
+    const esp_ble_mesh_node_t **nodes = esp_ble_mesh_provisioner_get_node_table_entry();
+    if (nodes == NULL) {
+        return;
+    }
+    uint16_t count = 0;
+    for (size_t i = 0; i < CONFIG_BLE_MESH_MAX_PROV_NODES; ++i) {
+        if (nodes[i] == NULL || nodes[i]->unicast_addr == s_provisioner_address) {
+            continue;
+        }
+        config_enqueue_locked(nodes[i]->unicast_addr);
+        count++;
+    }
+    if (count > 0) {
+        ESP_LOGI(TAG, "re-checking configuration of %u stored node(s)", count);
     }
 }
 
@@ -425,7 +631,6 @@ static void provisioner_mark_ready(void) {
         ESP_LOGW(TAG, "subscribe gateway telemetry group failed: %s",
                  esp_err_to_name(subscribe_err));
     }
-    s_provisioner_ready = true;
     s_primary_addr = s_provisioner_address;
     state_lock();
     xEventGroupSetBits(s_state_events,
@@ -433,6 +638,11 @@ static void provisioner_mark_ready(void) {
                        BM_MESH_STATE_CONTROL_BOUND |
                        BM_MESH_STATE_TELEMETRY_BOUND);
     state_unlock();
+    config_lock();
+    s_provisioner_ready = true;
+    config_resync_stored_nodes_locked();
+    config_pump_locked();
+    config_unlock();
     ESP_LOGI(TAG, "gateway Provisioner ready: addr=0x%04x node-range=0x%04x..0x%04x",
              s_provisioner_address, s_node_range_start, s_node_range_end);
 }
@@ -455,6 +665,19 @@ static void provisioner_enable_after_keys(void) {
     provisioner_mark_ready();
 }
 
+static void provisioner_warn_on_key_mismatch(void) {
+    const uint8_t *stored_net = esp_ble_mesh_provisioner_get_local_net_key(BM_NET_IDX);
+    const uint8_t *stored_app =
+        esp_ble_mesh_provisioner_get_local_app_key(BM_NET_IDX, BM_APP_IDX);
+    if ((stored_net != NULL && memcmp(stored_net, s_net_key, 16) != 0) ||
+        (stored_app != NULL && memcmp(stored_app, s_app_key, 16) != 0)) {
+        /* Keys persisted in NVS win: replacing them would orphan every node
+         * already provisioned.  A deliberate change needs a Mesh Key Refresh
+         * or an NVS erase plus re-provisioning. */
+        ESP_LOGE(TAG, "stored Mesh keys differ from the server's; keeping stored keys");
+    }
+}
+
 static void provisioner_start(uint16_t address, uint16_t range_start) {
     if (address == ESP_BLE_MESH_ADDR_UNASSIGNED ||
         address > BM_DEV_GATEWAY_ADDR_MAX ||
@@ -462,6 +685,10 @@ static void provisioner_start(uint16_t address, uint16_t range_start) {
         range_start > BM_DEV_BALLOON_ADDR_MAX) {
         ESP_LOGE(TAG, "invalid Provisioner identity addr=0x%04x range=0x%04x",
                  address, range_start);
+        return;
+    }
+    if (!s_keys_set) {
+        ESP_LOGE(TAG, "no Mesh network keys; Provisioner not started");
         return;
     }
     s_provisioner_address = address;
@@ -473,15 +700,16 @@ static void provisioner_start(uint16_t address, uint16_t range_start) {
                  esp_err_to_name(err));
         return;
     }
+    provisioner_warn_on_key_mismatch();
 
     if (esp_ble_mesh_provisioner_get_local_net_key(BM_NET_IDX) == NULL) {
-        err = esp_ble_mesh_provisioner_add_local_net_key(BM_DEV_NET_KEY, BM_NET_IDX);
+        err = esp_ble_mesh_provisioner_add_local_net_key(s_net_key, BM_NET_IDX);
         if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
             ESP_LOGE(TAG, "adding Provisioner NetKey failed: %s", esp_err_to_name(err));
             return;
         }
     } else if (esp_ble_mesh_provisioner_get_local_app_key(BM_NET_IDX, BM_APP_IDX) == NULL) {
-        err = esp_ble_mesh_provisioner_add_local_app_key(BM_DEV_APP_KEY, BM_NET_IDX, BM_APP_IDX);
+        err = esp_ble_mesh_provisioner_add_local_app_key(s_app_key, BM_NET_IDX, BM_APP_IDX);
         if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
             ESP_LOGE(TAG, "adding Provisioner AppKey failed: %s", esp_err_to_name(err));
             return;
@@ -491,113 +719,60 @@ static void provisioner_start(uint16_t address, uint16_t range_start) {
     }
 }
 
-static void config_client_set_common(esp_ble_mesh_client_common_param_t *common,
-                                      uint32_t opcode) {
-    memset(common, 0, sizeof(*common));
-    common->opcode = opcode;
-    common->model = s_config_client.model;
-    common->ctx.net_idx = BM_NET_IDX;
-    common->ctx.app_idx = BM_APP_IDX;
-    common->ctx.addr = s_config_target_addr;
-    common->ctx.send_ttl = 7;
-    common->ctx.send_rel = false;
-    common->msg_timeout = 5000;
-    common->msg_role = ROLE_PROVISIONER;
-}
-
 static bool remote_config_status_succeeded(uint32_t opcode, uint8_t status) {
     return status == ESP_BLE_MESH_CFG_STATUS_SUCCESS ||
            (opcode == ESP_BLE_MESH_MODEL_OP_APP_KEY_ADD &&
             status == ESP_BLE_MESH_CFG_STATUS_KEY_INDEX_ALREADY_STORED);
 }
 
-static void provisioner_configure_next(void) {
-    if (!s_provisioner_ready || s_config_target_addr == ESP_BLE_MESH_ADDR_UNASSIGNED) {
-        return;
-    }
-
-    esp_ble_mesh_client_common_param_t common;
-    esp_ble_mesh_cfg_client_set_state_t set_state = {0};
-    esp_err_t err;
-    if (s_config_step == 1) {
-        config_client_set_common(&common, ESP_BLE_MESH_MODEL_OP_APP_KEY_ADD);
-        set_state.app_key_add.net_idx = BM_NET_IDX;
-        set_state.app_key_add.app_idx = BM_APP_IDX;
-        memcpy(set_state.app_key_add.app_key, BM_DEV_APP_KEY, sizeof(BM_DEV_APP_KEY));
-        err = esp_ble_mesh_config_client_set_state(&common, &set_state);
-    } else if (s_config_step == 2 || s_config_step == 3) {
-        const uint16_t model_id = s_config_step == 2
-                                      ? BM_MODEL_ID_CONTROL
-                                      : BM_MODEL_ID_TELEMETRY;
-        config_client_set_common(&common, ESP_BLE_MESH_MODEL_OP_MODEL_APP_BIND);
-        set_state.model_app_bind.element_addr = s_config_target_addr;
-        set_state.model_app_bind.model_app_idx = BM_APP_IDX;
-        set_state.model_app_bind.company_id = BM_COMPANY_ID_LOCAL;
-        set_state.model_app_bind.model_id = model_id;
-        err = esp_ble_mesh_config_client_set_state(&common, &set_state);
-    } else {
-        s_config_target_addr = ESP_BLE_MESH_ADDR_UNASSIGNED;
-        return;
-    }
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "remote node configuration step %u failed: %s",
-                 s_config_step, esp_err_to_name(err));
-        schedule_provisioner_config_retry();
-    }
+static uint32_t config_step_opcode(uint8_t step) {
+    return step == BM_CONFIG_STEP_APP_KEY_ADD ? ESP_BLE_MESH_MODEL_OP_APP_KEY_ADD
+                                              : ESP_BLE_MESH_MODEL_OP_MODEL_APP_BIND;
 }
 
 static void config_client_cb(esp_ble_mesh_cfg_client_cb_event_t event,
                              esp_ble_mesh_cfg_client_cb_param_t *param) {
-    if (s_config_target_addr == ESP_BLE_MESH_ADDR_UNASSIGNED) {
-        return;
-    }
-    if (event == ESP_BLE_MESH_CFG_CLIENT_TIMEOUT_EVT) {
-        ESP_LOGW(TAG, "remote node configuration step %u timed out", s_config_step);
-        schedule_provisioner_config_retry();
-        return;
-    }
-    if (param == NULL) {
-        ESP_LOGW(TAG, "remote node configuration step %u returned without a callback",
-                 s_config_step);
-        schedule_provisioner_config_retry();
-        return;
-    }
-    if (param->params == NULL) {
-        ESP_LOGW(TAG, "remote node configuration step %u returned without parameters",
-                 s_config_step);
-        schedule_provisioner_config_retry();
-        return;
-    }
-    uint32_t opcode = param->params->opcode;
-    if (event != ESP_BLE_MESH_CFG_CLIENT_SET_STATE_EVT || param->error_code != ESP_OK) {
-        ESP_LOGW(TAG, "remote node configuration step %u returned error %d",
-                 s_config_step, param->error_code);
-        schedule_provisioner_config_retry();
+    if (param == NULL || param->params == NULL) {
+        /* Cannot tell which node this was for; fail the in-flight job so it
+         * is retried instead of stalling the queue. */
+        config_lock();
+        if (s_config_active >= 0) {
+            config_job_failed_locked(&s_config_jobs[s_config_active], "no parameters");
+        }
+        config_pump_locked();
+        config_unlock();
         return;
     }
 
-    uint8_t status = 0xFF;
-    if (opcode == ESP_BLE_MESH_MODEL_OP_APP_KEY_ADD) {
-        status = param->status_cb.appkey_status.status;
-    } else if (opcode == ESP_BLE_MESH_MODEL_OP_MODEL_APP_BIND) {
-        status = param->status_cb.model_app_status.status;
+    const uint16_t addr = param->params->ctx.addr;
+    const uint32_t opcode = param->params->opcode;
+    config_lock();
+    config_job_t *job = config_find_job(addr);
+    if (job == NULL || s_config_active != (int)(job - s_config_jobs) ||
+        config_step_opcode(job->step) != opcode) {
+        /* Stale response (e.g. job restarted after re-provisioning). */
+        config_unlock();
+        return;
+    }
+
+    if (event == ESP_BLE_MESH_CFG_CLIENT_TIMEOUT_EVT) {
+        config_job_failed_locked(job, "timeout");
+    } else if (event != ESP_BLE_MESH_CFG_CLIENT_SET_STATE_EVT || param->error_code != ESP_OK) {
+        config_job_failed_locked(job, "client error");
     } else {
-        return;
+        uint8_t status = opcode == ESP_BLE_MESH_MODEL_OP_APP_KEY_ADD
+                             ? param->status_cb.appkey_status.status
+                             : param->status_cb.model_app_status.status;
+        if (remote_config_status_succeeded(opcode, status)) {
+            config_job_succeeded_locked(job);
+        } else {
+            char reason[24];
+            snprintf(reason, sizeof(reason), "remote status %u", status);
+            config_job_failed_locked(job, reason);
+        }
     }
-    if (!remote_config_status_succeeded(opcode, status)) {
-        ESP_LOGW(TAG, "remote node configuration opcode 0x%04lx status=%u",
-                 (unsigned long)opcode, status);
-        schedule_provisioner_config_retry();
-        return;
-    }
-    stop_provisioner_config_retry();
-    s_config_step++;
-    if (s_config_step > 3) {
-        reset_provisioner_config_retry();
-        s_config_target_addr = ESP_BLE_MESH_ADDR_UNASSIGNED;
-        return;
-    }
-    provisioner_configure_next();
+    config_pump_locked();
+    config_unlock();
 }
 
 static void provisioner_prov_cb(esp_ble_mesh_prov_cb_event_t event,
@@ -621,21 +796,27 @@ static void provisioner_prov_cb(esp_ble_mesh_prov_cb_event_t event,
                 param->provisioner_recv_unprov_adv_pkt.oob_info,
                 (uint8_t)param->provisioner_recv_unprov_adv_pkt.bearer);
             break;
+        case ESP_BLE_MESH_PROVISIONER_PROV_LINK_CLOSE_EVT:
+            /* Fires after both success and failure. */
+            if (s_prov_link_events != NULL) {
+                xEventGroupSetBits(s_prov_link_events, BM_PROV_LINK_IDLE);
+            }
+            break;
         case ESP_BLE_MESH_PROVISIONER_PROV_COMPLETE_EVT:
             ESP_LOGI(TAG, "Provisioned node addr=0x%04x elements=%u",
                      param->provisioner_prov_complete.unicast_addr,
                      param->provisioner_prov_complete.element_num);
-            reset_provisioner_config_retry();
-            s_config_target_addr = param->provisioner_prov_complete.unicast_addr;
-            s_config_step = 1;
-            provisioner_configure_next();
+            config_lock();
+            config_enqueue_locked(param->provisioner_prov_complete.unicast_addr);
+            config_pump_locked();
+            config_unlock();
             break;
         case ESP_BLE_MESH_PROVISIONER_ADD_LOCAL_NET_KEY_COMP_EVT:
             if (param->provisioner_add_net_key_comp.err_code == ESP_OK ||
                 param->provisioner_add_net_key_comp.err_code == -EALREADY) {
                 if (esp_ble_mesh_provisioner_get_local_app_key(BM_NET_IDX, BM_APP_IDX) == NULL) {
                     (void)esp_ble_mesh_provisioner_add_local_app_key(
-                        BM_DEV_APP_KEY, BM_NET_IDX, BM_APP_IDX);
+                        s_app_key, BM_NET_IDX, BM_APP_IDX);
                 } else {
                     provisioner_enable_after_keys();
                 }
@@ -652,7 +833,57 @@ static void provisioner_prov_cb(esp_ble_mesh_prov_cb_event_t event,
     }
 }
 
+esp_err_t bm_gateway_mesh_provision_device(const uint8_t uuid[16],
+                                           const uint8_t addr[6],
+                                           uint8_t addr_type,
+                                           uint8_t bearer,
+                                           uint16_t oob_info,
+                                           uint16_t unicast_addr,
+                                           uint32_t link_timeout_ms) {
+    if (s_prov_link_events == NULL || !s_provisioner_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* One provisioning link at a time: wait for the previous one to close. */
+    if ((xEventGroupWaitBits(s_prov_link_events, BM_PROV_LINK_IDLE, pdFALSE, pdTRUE,
+                             pdMS_TO_TICKS(link_timeout_ms)) & BM_PROV_LINK_IDLE) == 0) {
+        ESP_LOGW(TAG, "previous provisioning link did not close; continuing");
+    }
+    xEventGroupClearBits(s_prov_link_events, BM_PROV_LINK_IDLE);
+    esp_ble_mesh_bd_addr_t bd_addr = {0};
+    memcpy(bd_addr, addr, sizeof(bd_addr));
+    esp_err_t err = esp_ble_mesh_provisioner_prov_device_with_addr(
+        uuid, bd_addr, (esp_ble_mesh_addr_type_t)addr_type,
+        (esp_ble_mesh_prov_bearer_t)bearer, oob_info, unicast_addr);
+    if (err != ESP_OK) {
+        xEventGroupSetBits(s_prov_link_events, BM_PROV_LINK_IDLE);
+    }
+    return err;
+}
+
 #endif
+
+void bm_gateway_mesh_set_network_keys(const uint8_t net_key[16], const uint8_t app_key[16]) {
+#if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER && \
+    defined(CONFIG_BLE_MESH_PROVISIONER) && CONFIG_BLE_MESH_PROVISIONER
+#if defined(BM_DEV_AUTO_PROV) && BM_DEV_AUTO_PROV
+    (void)net_key;
+    (void)app_key;
+    ESP_LOGW(TAG, "DEVELOPMENT build: ignoring server Mesh keys, using shared test keys");
+    memcpy(s_net_key, BM_DEV_NET_KEY, sizeof(s_net_key));
+    memcpy(s_app_key, BM_DEV_APP_KEY, sizeof(s_app_key));
+#else
+    if (net_key == NULL || app_key == NULL) {
+        return;
+    }
+    memcpy(s_net_key, net_key, sizeof(s_net_key));
+    memcpy(s_app_key, app_key, sizeof(s_app_key));
+#endif
+    s_keys_set = true;
+#else
+    (void)net_key;
+    (void)app_key;
+#endif
+}
 
 static void handle_vendor_model_bind_result(const esp_ble_mesh_prov_cb_param_t *param) {
     if (param == NULL) {
@@ -921,6 +1152,16 @@ void bm_gateway_mesh_init(uint16_t development_address,
         .name = "bm_config_retry",
     };
     ESP_ERROR_CHECK(esp_timer_create(&config_retry_args, &s_config_retry_timer));
+    s_config_lock = xSemaphoreCreateMutexStatic(&s_config_lock_storage);
+    s_prov_link_events = xEventGroupCreateStatic(&s_prov_link_events_storage);
+    if (s_config_lock == NULL || s_prov_link_events == NULL) {
+        ESP_LOGE(TAG, "Provisioner sync primitives creation failed");
+        return;
+    }
+    xEventGroupSetBits(s_prov_link_events, BM_PROV_LINK_IDLE);
+    for (size_t i = 0; i < BM_CONFIG_JOB_MAX; ++i) {
+        s_config_jobs[i].addr = ESP_BLE_MESH_ADDR_UNASSIGNED;
+    }
 #endif
     ESP_LOGI(TAG, "step 3: bt controller init");
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();

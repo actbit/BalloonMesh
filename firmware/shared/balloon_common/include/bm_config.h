@@ -114,12 +114,29 @@ static const bm_anchor_entry_t BM_ANCHORS[] = {
 #ifndef BM_GATEWAY_ID
 #define BM_GATEWAY_ID ""
 #endif
+/* Server base URL.  Production gateways must use https://; set it with the
+ * BM_SERVER_URL environment variable (see platformio.ini). */
 #ifndef BM_SERVER_URL
-#define BM_SERVER_URL "http://192.168.1.10:5080"
+#define BM_SERVER_URL ""
 #endif
-/* Optional PEM CA bundle for HTTPS gateways. Define through build_flags. */
-#ifndef BM_TLS_CA_CERT
-/* #define BM_TLS_CA_CERT "-----BEGIN CERTIFICATE-----\n..." */
+/* CA certificate (PEM) that signs the server certificate.  Provide it either
+ * through build_flags or by creating the git-ignored header
+ * firmware/shared/balloon_common/include/bm_server_ca.h containing:
+ *   #define BM_TLS_CA_CERT "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n"
+ */
+#if !defined(BM_TLS_CA_CERT) && defined(__has_include)
+#if __has_include("bm_server_ca.h")
+#include "bm_server_ca.h"
+#endif
+#endif
+/* Plain HTTP/WS or unverified TLS is only allowed in explicit development
+ * builds.  Everything else must verify the server certificate chain and host
+ * name, because the gateway API key and Mesh network keys cross this link. */
+#ifndef BM_ALLOW_INSECURE_TRANSPORT
+#define BM_ALLOW_INSECURE_TRANSPORT 0
+#endif
+#if defined(BM_ROLE_GATEWAY) && !BM_ALLOW_INSECURE_TRANSPORT && !defined(BM_TLS_CA_CERT)
+#error "Gateway builds require BM_TLS_CA_CERT (see bm_config.h) unless BM_ALLOW_INSECURE_TRANSPORT=1"
 #endif
 #ifndef BM_GATEWAY_WIFI_SSID
 #define BM_GATEWAY_WIFI_SSID "balloon-mesh"

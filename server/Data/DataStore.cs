@@ -92,6 +92,14 @@ public sealed record GatewayApiKeyRecord(
     DateTimeOffset? RevokedAt,
     bool Active);
 
+/// <summary>Mesh NetKey/AppKey for one network, generated server-side.</summary>
+public sealed record MeshNetworkKeysRecord(
+    int NetIndex,
+    int AppIndex,
+    byte[] NetKey,
+    byte[] AppKey,
+    DateTimeOffset CreatedAt);
+
 public sealed record GatewayApiKeyIssuedRecord(
     long Id,
     string GatewayId,
@@ -253,6 +261,13 @@ public sealed class DataStore
                 revoked_at TIMESTAMPTZ NULL);
             CREATE INDEX IF NOT EXISTS ix_gateway_api_keys_active
                 ON gateway_api_keys(gateway_id, revoked_at);
+            CREATE TABLE IF NOT EXISTS mesh_network_keys(
+                net_idx INTEGER NOT NULL,
+                app_idx INTEGER NOT NULL,
+                net_key BYTEA NOT NULL CHECK (octet_length(net_key) = 16),
+                app_key BYTEA NOT NULL CHECK (octet_length(app_key) = 16),
+                created_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY(net_idx, app_idx));
             """;
         command.ExecuteNonQuery();
         Seed(connection);
@@ -283,7 +298,7 @@ public sealed class DataStore
             command.CommandText = """
                 TRUNCATE TABLE positions, show_steps, gateway_mesh_node_addresses,
                     gateway_mesh_address_ranges, gateway_mesh_addresses,
-                    gateway_api_keys, balloons, anchors, balloon_groups
+                    gateway_api_keys, mesh_network_keys, balloons, anchors, balloon_groups
                 RESTART IDENTITY CASCADE;
                 """;
             command.ExecuteNonQuery();
@@ -748,6 +763,49 @@ public sealed class DataStore
         command.Parameters.AddWithValue("gateway_id", gatewayId.Trim());
         command.Parameters.AddWithValue("token_hash", HashGatewayApiToken(token));
         return (bool)command.ExecuteScalar()!;
+    }
+
+    /// <summary>
+    /// Returns the Mesh NetKey/AppKey for the given indexes, generating them
+    /// with a CSPRNG the first time.  Keys live only in the database (back it
+    /// up), never in firmware, so each deployment has its own network keys.
+    /// </summary>
+    public MeshNetworkKeysRecord GetOrCreateMeshNetworkKeys(int netIndex, int appIndex)
+    {
+        lock (_writeGate)
+        {
+            using var connection = Open();
+            using (var insert = connection.CreateCommand())
+            {
+                insert.CommandText = """
+                    INSERT INTO mesh_network_keys(net_idx, app_idx, net_key, app_key, created_at)
+                    VALUES(@net_idx, @app_idx, @net_key, @app_key, @created_at)
+                    ON CONFLICT (net_idx, app_idx) DO NOTHING;
+                    """;
+                insert.Parameters.AddWithValue("net_idx", netIndex);
+                insert.Parameters.AddWithValue("app_idx", appIndex);
+                insert.Parameters.AddWithValue("net_key", RandomNumberGenerator.GetBytes(16));
+                insert.Parameters.AddWithValue("app_key", RandomNumberGenerator.GetBytes(16));
+                insert.Parameters.AddWithValue("created_at", DateTimeOffset.UtcNow);
+                insert.ExecuteNonQuery();
+            }
+
+            using var select = connection.CreateCommand();
+            select.CommandText = """
+                SELECT net_key, app_key, created_at FROM mesh_network_keys
+                WHERE net_idx = @net_idx AND app_idx = @app_idx;
+                """;
+            select.Parameters.AddWithValue("net_idx", netIndex);
+            select.Parameters.AddWithValue("app_idx", appIndex);
+            using var reader = select.ExecuteReader();
+            reader.Read();
+            return new MeshNetworkKeysRecord(
+                netIndex,
+                appIndex,
+                reader.GetFieldValue<byte[]>(0),
+                reader.GetFieldValue<byte[]>(1),
+                reader.GetFieldValue<DateTimeOffset>(2));
+        }
     }
 
     private sealed record MeshAddressRange(long Id, int Start, int End, int NextAddress);

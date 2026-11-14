@@ -84,18 +84,43 @@ balloon は XIAO ESP32C3 の **D0/D1/D2 (GPIO2/3/4)** を **LEDC 5kHz / 8bit** �
 - `platformio.ini` の `BM_GATEWAY_USE_WEBSOCKET=1`（既定）
   - `0` にすると HTTP ポーリングへ切り替え
 - `gateway` / `gateway-dev` 環境は起動後に BOOT ボタンを3秒長押しするとNVSを消去できる。両環境ともGateway自身が標準Provisionerとして動作し、Wi-FiでサーバーからGatewayアドレスとノード範囲を取得する。ノード範囲は最初の64アドレスを使い切ると16アドレスずつ追加されるため、開発用と本番用でProvisionerの動作差はありません。
-- Gateway IDはBluetooth MACから自動生成される。再現性が必要なテストや既存設備との互換性が必要な場合だけ `BM_GATEWAY_ID` をbuild flagで上書きする。`BM_SERVER_URL` / Wi-Fi 設定も `bm_config.h` で指定する。
+- Gateway IDはBluetooth MACから自動生成される。再現性が必要なテストや既存設備との互換性が必要な場合だけ `BM_GATEWAY_ID` をbuild flagで上書きする。
+- 接続先は環境変数 `BM_SERVER_URL` でビルド時に指定する（空なら起動を拒否）。
+- **本番 `gateway` 環境**（`BM_PRODUCTION_BUILD=1`）
+  - `https://` 以外の接続先では起動しない。
+  - サーバー証明書を発行したCAを `firmware/shared/balloon_common/include/bm_server_ca.h`（git管理外）に `#define BM_TLS_CA_CERT "-----BEGIN CERTIFICATE-----\n..."` として置く。無ければビルドエラーになる。
+  - HTTPS/WSS ともCAチェーンとホスト名を検証する。
+- **Mesh鍵**
+  - 本番のNetKey/AppKeyはサーバーがデプロイごとに乱数生成し、DBの `mesh_network_keys` に保存する。Gatewayは `mesh-address` の応答で受け取る。
+  - 鍵を受け取れるのは、そのGateway自身のAPIキーで認証したときだけ（共有 `Gateway:Token` では受け取れない）。
+  - 各ノードのDevKeyはProvisioning時にECDHで個別に生成される。
+  - 鍵はDBにしかないので、**DBのバックアップは必須**。DBを失うと既存ネットワークの鍵も失われる。
+  - Gatewayは一度NVSに保存した鍵を優先し、サーバーの鍵と異なればエラーログを出す。鍵を変えるにはNVS消去と再Provisioningが必要（Key Refreshは未実装）。
+- **`gateway-dev` / `balloon-mesh-bringup`**
+  - 全デバイス共通の開発用テスト鍵と `http://` を使う。本番へは投入しない。
+  - `BM_PRODUCTION_BUILD` と同時には有効にできない（ビルドエラー）。
+- **Provisioning**
+  - Provisioningは1台ずつ直列に行う。
+  - 各ノードの設定（AppKey追加とモデルBind）はノードごとのジョブとして管理する。失敗しても破棄せず、バックオフしながら再試行し続ける。
+  - 起動時にはNVSに保存済みの全ノードについて設定をやり直すので、設定の途中で電源が落ちても復旧する。
 - Gateway APIキーはサーバーのAdmin画面でGateway IDごとに発行する。発行直後に表示された平文を保存し、ローカルのビルド時だけ `BM_GATEWAY_TOKEN` として渡す。キーはサーバー側ではハッシュのみ保存され、1 Gatewayにつき有効キーは1本（再発行時に旧キーは失効）である。
 
 ```powershell
 $env:BM_GATEWAY_TOKEN = "bm_live_..."
+$env:BM_SERVER_URL = "https://balloon.example.com"
+$env:BM_WIFI_SSID = "..."
+$env:BM_WIFI_PASS = "..."
 cd firmware/gateway
 pio run -e gateway
 pio run -e gateway -t upload
 ```
 
-`BM_GATEWAY_TOKEN` はソースへコミットしない。サーバーの `Gateway:Token` は既存環境からの移行用の共有キーであり、GatewayごとのAPIキー運用では空にする。APIキー発行済みのGatewayは、空キーや別Gatewayのキーでは接続できない。未発行Gatewayの無認証接続は、既存の開発・初回登録フローを維持するための互換動作である。
-- WSS/HTTPS の CA は `-DBM_TLS_CA_CERT=\"...\"` で指定
+`BM_GATEWAY_TOKEN` はソースへコミットしない。
+
+**サーバー側の認証**
+- APIキー発行済みのGatewayは、自分のAPIキーでしか認証できない。共有の `Gateway:Token`、空キー、別Gatewayのキーはすべて拒否される。
+- `Gateway:Token` は移行用の共有キーで、キー未発行のGatewayにだけ有効。これで認証したGatewayはイベント送受信だけができ、Meshアドレスの払い出しとMesh鍵の取得はできない。
+- 無認証の接続は `Gateway:AllowUnkeyedGateways=true`（開発用）のときだけ受け付ける。
 
 BOOTを押したままリセットするとESP32-C3のROM書き込みモードに入るため、NVS消去は通常起動後に実行する。
 

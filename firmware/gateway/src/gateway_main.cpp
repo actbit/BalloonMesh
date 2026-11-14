@@ -33,18 +33,46 @@ static int vprintf_to_serial(const char *fmt, va_list args) {
     return len;
 }
 
-/// HTTP/HTTPS transport selection.  Define BM_TLS_CA_CERT in the build flags
-/// for certificate validation; without it the prototype uses setInsecure().
+static bool server_url_is_https(void) {
+    return strncmp(BM_SERVER_URL, "https://", 8) == 0;
+}
+
+/// Refuses to run with a transport that would expose the gateway API key or
+/// the Mesh network keys.  Only BM_ALLOW_INSECURE_TRANSPORT=1 (development
+/// envs) may use http:// or TLS without a CA.
+static bool transport_policy_ok(void) {
+    if (strlen(BM_SERVER_URL) == 0) {
+        ESP_LOGE(TAG, "BM_SERVER_URL is empty; set it at build time");
+        return false;
+    }
+#if BM_ALLOW_INSECURE_TRANSPORT
+    if (!server_url_is_https()) {
+        ESP_LOGW(TAG, "DEVELOPMENT build: talking to %s without TLS", BM_SERVER_URL);
+    }
+    return true;
+#else
+    if (!server_url_is_https()) {
+        ESP_LOGE(TAG, "BM_SERVER_URL must be https:// (got %s)", BM_SERVER_URL);
+        return false;
+    }
+    return true;
+#endif
+}
+
+/// HTTP/HTTPS transport.  HTTPS always validates the chain against
+/// BM_TLS_CA_CERT and the host name (WiFiClientSecure checks the SAN/CN).
 class GatewayHttpClient {
 public:
     GatewayHttpClient() {
-        https_ = strncmp(BM_SERVER_URL, "https://", 8) == 0;
+        https_ = server_url_is_https();
         if (https_) {
 #ifdef BM_TLS_CA_CERT
             secure_.setCACert(BM_TLS_CA_CERT);
 #else
+            /* Only reachable with BM_ALLOW_INSECURE_TRANSPORT=1 (bm_config.h
+             * refuses to compile otherwise). */
             secure_.setInsecure();
-            ESP_LOGW(TAG, "HTTPS without pinned CA (set BM_TLS_CA_CERT for production)");
+            ESP_LOGW(TAG, "DEVELOPMENT build: HTTPS without certificate validation");
 #endif
             secure_.setTimeout(15000);
         }
@@ -76,7 +104,29 @@ struct GatewayMeshConfig {
     uint16_t mesh_address = 0;
     uint16_t node_range_start = 0;
     uint16_t node_range_end = 0;
+    bool keys_valid = false;
+    uint8_t net_key[16] = {0};
+    uint8_t app_key[16] = {0};
 };
+
+static bool parse_hex_key(const cJSON *item, uint8_t out[16]) {
+    if (!cJSON_IsString(item) || item->valuestring == nullptr ||
+        strlen(item->valuestring) != 32) {
+        return false;
+    }
+    bool nonzero = false;
+    for (size_t i = 0; i < 16; ++i) {
+        char pair[3] = {item->valuestring[i * 2], item->valuestring[i * 2 + 1], '\0'};
+        char *end = nullptr;
+        unsigned long value = strtoul(pair, &end, 16);
+        if (end != pair + 2) {
+            return false;
+        }
+        out[i] = (uint8_t)value;
+        nonzero = nonzero || value != 0;
+    }
+    return nonzero;
+}
 
 #if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER
 struct UnprovisionedDevice {
@@ -188,10 +238,19 @@ static bool request_gateway_mesh_address(GatewayMeshConfig *config) {
         config->node_range_start = (uint16_t)range_start->valueint;
         config->node_range_end = (uint16_t)range_end->valueint;
     }
+    config->keys_valid =
+        parse_hex_key(cJSON_GetObjectItem(root, "netKey"), config->net_key) &&
+        parse_hex_key(cJSON_GetObjectItem(root, "appKey"), config->app_key);
     cJSON_Delete(root);
     if (!valid || !range_valid) {
         ESP_LOGW(TAG, "gateway Mesh address response was invalid");
     }
+#if !(defined(BM_DEV_AUTO_PROV) && BM_DEV_AUTO_PROV)
+    if (!config->keys_valid) {
+        ESP_LOGW(TAG, "gateway Mesh address response carried no valid network keys");
+        return false;
+    }
+#endif
     return valid && range_valid;
 }
 
@@ -264,13 +323,12 @@ static void provisioner_task(void *argument) {
             ESP_LOGW(TAG, "node address was not allocated; another Provisioner may own it");
             continue;
         }
-        esp_ble_mesh_bd_addr_t addr = {0};
-        memcpy(addr, device.addr, sizeof(addr));
-        esp_err_t err = esp_ble_mesh_provisioner_prov_device_with_addr(
-            device.uuid, addr,
-            (esp_ble_mesh_addr_type_t)device.addr_type,
-            (esp_ble_mesh_prov_bearer_t)device.bearer,
-            device.oob_info, mesh_address);
+        /* Waits for the previous provisioning link to close, so devices are
+         * provisioned one at a time.  Remote configuration is tracked per
+         * node inside gateway_mesh.c. */
+        esp_err_t err = bm_gateway_mesh_provision_device(
+            device.uuid, device.addr, device.addr_type, device.bearer,
+            device.oob_info, mesh_address, 60000);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "starting provisioning for 0x%04x failed: %s",
                      mesh_address, esp_err_to_name(err));
@@ -542,6 +600,7 @@ static void mesh_bootstrap_task(void *argument) {
         if (connect_wifi_once() && request_gateway_mesh_address(&mesh_config)) {
             Serial.println("[GW] central gateway Mesh allocation received");
             Serial.flush();
+            bm_gateway_mesh_set_network_keys(mesh_config.net_key, mesh_config.app_key);
             bm_gateway_mesh_init(mesh_config.mesh_address,
                                  mesh_config.mesh_address,
                                  mesh_config.node_range_start,
@@ -568,6 +627,12 @@ void setup() {
 
     if (!bm_device_gateway_id_is_valid()) {
         ESP_LOGE(TAG, "gateway identity unavailable; refusing to start with a shared ID");
+        while (true) {
+            delay(1000);
+        }
+    }
+    if (!transport_policy_ok()) {
+        ESP_LOGE(TAG, "insecure server transport; refusing to start");
         while (true) {
             delay(1000);
         }

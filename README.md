@@ -466,7 +466,7 @@ FTM_REPORT の 4B timestamp は、確定仕様で未決定のため **LED tick40
 1. **BLE Mesh Node / Provisioner のビルド構成**
    `balloon` と `gateway` は `framework = arduino, espidf` とし、ESP-IDF 4.4.7 を Arduino のコンポーネントとして組み込みます。`sdkconfig.defaults` で `CONFIG_BLE_MESH_NODE=y`、`CONFIG_BLE_MESH_PROVISIONER=y`、`CONFIG_BLE_MESH_CFG_CLI=y`、`CONFIG_BLE_MESH_SETTINGS=y` を有効にして Bluetooth スタックをソースからビルドするため、Arduino 同梱のプリビルド `libbt.a` は使いません。Provisioning 情報（ユニキャストアドレス、NetKey/AppKey、model bind、group subscription、SEQ/RPL）は NVS に保存され、再起動後も復元されます。初回ビルドは ESP-IDF 全体を作るため時間がかかりますが、2 回目以降は差分ビルドになります。詳細は [firmware/README.md](firmware/README.md) と [docs/decisions.md](docs/decisions.md) の項目 12 を参照してください。
 2. **Gateway の Protocol C**  
-   サーバは WebSocket と HTTP ポーリングの両方を実装しています。Arduino Gateway は既定で WebSocket（`BM_GATEWAY_USE_WEBSOCKET=1`）を使用し、`BM_SERVER_URL` が `https://` の場合は WSS になります。HTTP ポーリングへ戻す場合は `platformio.ini` のフラグを 0 にしてください。CA を `BM_TLS_CA_CERT` で指定しない場合は証明書ピン留めなしになるため、本番では必ず CA を設定してください。
+   サーバは WebSocket と HTTP ポーリングの両方を実装しています。Arduino Gateway は既定で WebSocket（`BM_GATEWAY_USE_WEBSOCKET=1`）を使用し、`BM_SERVER_URL` が `https://` の場合は WSS になります。HTTP ポーリングへ戻す場合は `platformio.ini` のフラグを 0 にしてください。本番 `gateway` 環境は `https://` と CA（`bm_server_ca.h` の `BM_TLS_CA_CERT`）が必須で、証明書チェーンとホスト名を検証します。`http://` や検証なしの TLS は `gateway-dev`（`BM_ALLOW_INSECURE_TRANSPORT=1`）でのみ使えます。
 3. **FTM timestamp** と **NEIGHBOR_REPORT の 2 件/パケット** は仕様未確定のため暫定値です。実装凍結前に [docs/decisions.md](docs/decisions.md) の項目を確定してください。
 4. **即時命令の順序**  
    `LED_SET_NOW` の `issued_tick` と `LED_RESET_AND_SET` の `cutoff` は意味が異なるため、相互の新旧比較は行いません。遅延到着時の色戻りリスクは仕様どおり残ります。

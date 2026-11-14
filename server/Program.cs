@@ -254,7 +254,8 @@ app.MapPost("/api/gateway/{id}/mesh-address",
     (HttpContext http, string id, GatewayMeshAddressRequest request,
         DataStore store, IConfiguration configuration) =>
     {
-        if (!GatewayAuth.IsAuthorized(http, id, store, configuration))
+        var auth = GatewayAuth.Authenticate(http, id, store, configuration);
+        if (!GatewayAuth.MayReceiveMeshIdentity(auth))
         {
             return Results.Unauthorized();
         }
@@ -262,13 +263,18 @@ app.MapPost("/api/gateway/{id}/mesh-address",
         {
             var identity = store.GetOrAllocateGatewayMeshIdentity(id, request.DeviceUuid);
             var range = store.GetOrAllocateGatewayMeshAddressRange(id, request.DeviceUuid);
+            var keys = store.GetOrCreateMeshNetworkKeys(MeshNetwork.NetIndex, MeshNetwork.AppIndex);
             return Results.Ok(new
             {
                 gatewayId = identity.GatewayId,
                 meshAddress = identity.MeshAddress,
                 rangeStart = range.RangeStart,
                 rangeEnd = range.RangeEnd,
-                nextAddress = range.NextAddress
+                nextAddress = range.NextAddress,
+                netIndex = keys.NetIndex,
+                appIndex = keys.AppIndex,
+                netKey = Convert.ToHexString(keys.NetKey),
+                appKey = Convert.ToHexString(keys.AppKey)
             });
         }
         catch (ArgumentException exception)
@@ -285,7 +291,8 @@ app.MapPost("/api/gateway/{id}/mesh-node-address",
     (HttpContext http, string id, GatewayMeshNodeAddressRequest request,
         DataStore store, IConfiguration configuration) =>
     {
-        if (!GatewayAuth.IsAuthorized(http, id, store, configuration))
+        if (!GatewayAuth.MayReceiveMeshIdentity(
+                GatewayAuth.Authenticate(http, id, store, configuration)))
         {
             return Results.Unauthorized();
         }
