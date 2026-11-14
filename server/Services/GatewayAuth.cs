@@ -11,6 +11,11 @@ public static class GatewayAuth
     public static string? ConfiguredToken(IConfiguration configuration) =>
         configuration["Gateway:Token"];
 
+    // Gateways without an issued key are accepted unauthenticated only when
+    // explicitly enabled (development / first-time bootstrap). Defaults to false.
+    public static bool AllowUnkeyedGateways(IConfiguration configuration) =>
+        configuration.GetValue<bool>("Gateway:AllowUnkeyedGateways");
+
     public static bool IsAuthorized(HttpContext context, IConfiguration configuration)
     {
         var expected = ConfiguredToken(configuration);
@@ -57,9 +62,9 @@ public static class GatewayAuth
             return false;
         }
 
-        // Keep the existing development/bootstrap behavior until a gateway
-        // has an issued key or a global legacy token is configured.
-        return string.IsNullOrWhiteSpace(configured);
+        // Development/bootstrap: unkeyed gateways pass only when no legacy
+        // token is configured AND Gateway:AllowUnkeyedGateways is enabled.
+        return string.IsNullOrWhiteSpace(configured) && AllowUnkeyedGateways(configuration);
     }
 
     public static bool Matches(string? provided, string? expected)

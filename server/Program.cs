@@ -50,10 +50,11 @@ dataStore.Initialize();
 dataStore.ResetRuntimeQueueState();
 
 if (string.IsNullOrWhiteSpace(GatewayAuth.ConfiguredToken(app.Configuration)) &&
+    GatewayAuth.AllowUnkeyedGateways(app.Configuration) &&
     !app.Environment.IsDevelopment())
 {
     app.Logger.LogWarning(
-        "Gateway:Token is not configured; gateway authentication uses per-Gateway API keys when issued, otherwise development/bootstrap clients are accepted.");
+        "Gateway:AllowUnkeyedGateways is enabled without Gateway:Token; gateways without an issued API key are accepted unauthenticated.");
 }
 
 app.UseWebSockets(new WebSocketOptions

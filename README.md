@@ -234,7 +234,7 @@ cd firmware/gateway
 pio run -e gateway
 ```
 
-`Gateway:Token` は既存環境からの移行用の全 Gateway 共通キーです。個別 API キーで運用する本番環境では空にしてください。キー未発行の Gateway は、既存の開発・初回登録フローを維持するため、`Gateway:Token` も空の場合に限り認証を通します。API キーを発行した Gateway は、空キーや誤ったキーを拒否します。
+`Gateway:Token` は既存環境からの移行用の全 Gateway 共通キーです。個別 API キーで運用する本番環境では空にしてください。キー未発行の Gateway は既定で拒否されます。開発・初回登録用に `Gateway:AllowUnkeyedGateways` を `true` にした場合（`appsettings.Development.json` では有効）に限り、`Gateway:Token` も空なら認証なしで通します。本番では `false` のままにしてください。API キーを発行した Gateway は、空キーや誤ったキーを拒否します。
 
 ### OIDC
 
