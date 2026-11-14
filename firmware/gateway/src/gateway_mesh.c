@@ -52,6 +52,15 @@ static uint32_t s_bind_retry_delay_ms = 1000;
 static uint8_t s_bind_retry_attempts;
 static esp_timer_handle_t s_prov_retry_timer;
 static uint32_t s_prov_retry_delay_ms = 1000;
+/* bm_gateway_mesh_send() waits for the real outcome from the send-completion
+ * event, so that a failed air transmission is reported to the downlink retry
+ * loop instead of being counted as sent. */
+static StaticSemaphore_t s_send_done_storage;
+static SemaphoreHandle_t s_send_done;
+static StaticSemaphore_t s_send_mutex_storage;
+static SemaphoreHandle_t s_send_mutex;
+static volatile esp_err_t s_send_result = ESP_FAIL;
+#define BM_DOWNLINK_SEND_TIMEOUT_MS 2000u
 
 /* Paced downlink queue.  See bm_gateway_mesh_enqueue() in the header. */
 #define BM_DOWNLINK_QUEUE_LENGTH 96
@@ -1108,6 +1117,10 @@ static void custom_model_cb(esp_ble_mesh_model_cb_event_t event,
         ESP_LOGI(TAG, "model send comp: err=%d opcode=0x%06lx",
                  param->model_send_comp.err_code,
                  (unsigned long)param->model_send_comp.opcode);
+        s_send_result = param->model_send_comp.err_code;
+        if (s_send_done != NULL) {
+            xSemaphoreGive(s_send_done);
+        }
         return;
     }
     if (event == ESP_BLE_MESH_CLIENT_MODEL_SEND_TIMEOUT_EVT) {
@@ -1147,6 +1160,12 @@ void bm_gateway_mesh_init(uint16_t development_address,
     s_state_lock = xSemaphoreCreateMutexStatic(&s_state_lock_storage);
     if (s_state_lock == NULL) {
         ESP_LOGE(TAG, "mesh state mutex creation failed");
+        return;
+    }
+    s_send_done = xSemaphoreCreateBinaryStatic(&s_send_done_storage);
+    s_send_mutex = xSemaphoreCreateMutexStatic(&s_send_mutex_storage);
+    if (s_send_done == NULL || s_send_mutex == NULL) {
+        ESP_LOGE(TAG, "mesh send synchronisation creation failed");
         return;
     }
     s_downlink_queue = xQueueCreate(BM_DOWNLINK_QUEUE_LENGTH, sizeof(bm_downlink_t));
@@ -1300,9 +1319,19 @@ bool bm_gateway_mesh_send(uint16_t dst,
                           uint8_t ttl,
                           const uint8_t *payload,
                           uint16_t length) {
+    if (s_send_mutex == NULL || s_send_done == NULL) {
+        return false;
+    }
+    /* One downlink in flight at a time, so the completion event read below
+     * belongs to this message. */
+    if (xSemaphoreTake(s_send_mutex, pdMS_TO_TICKS(BM_DOWNLINK_SEND_TIMEOUT_MS)) != pdTRUE) {
+        return false;
+    }
+    (void)xSemaphoreTake(s_send_done, 0);
     state_lock();
     if (!mesh_is_provisioned() || !vendor_models_ready()) {
         state_unlock();
+        xSemaphoreGive(s_send_mutex);
         return false;
     }
     esp_ble_mesh_msg_ctx_t ctx = {
@@ -1311,13 +1340,25 @@ bool bm_gateway_mesh_send(uint16_t dst,
         .addr = dst,
         .send_ttl = ttl,
     };
+    /* Provisioner role: the keys live in the Provisioner's local key lists. */
     esp_err_t err = esp_ble_mesh_client_model_send_msg(
         &s_vendor_models[0], &ctx, opcode, length, (uint8_t *)payload, 0, false,
-        ROLE_NODE);
+        ROLE_PROVISIONER);
     state_unlock();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "mesh send 0x%06lx: %s", (unsigned long)opcode,
                  esp_err_to_name(err));
+        xSemaphoreGive(s_send_mutex);
+        return false;
+    }
+    /* esp_ble_mesh_client_model_send_msg() only queues the message: the air
+     * outcome is reported by ESP_BLE_MESH_MODEL_SEND_COMP_EVT. */
+    bool done = xSemaphoreTake(s_send_done, pdMS_TO_TICKS(BM_DOWNLINK_SEND_TIMEOUT_MS)) == pdTRUE;
+    esp_err_t result = done ? s_send_result : ESP_ERR_TIMEOUT;
+    xSemaphoreGive(s_send_mutex);
+    if (result != ESP_OK) {
+        ESP_LOGW(TAG, "mesh send 0x%06lx failed: %s", (unsigned long)opcode,
+                 esp_err_to_name(result));
         return false;
     }
     return true;

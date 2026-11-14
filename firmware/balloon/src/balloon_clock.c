@@ -10,6 +10,11 @@
 #define BM_CLOCK_MIN_CORRECTION_MS 50
 /* 2100-01-01T00:00:00Z: anything beyond is a corrupt date, not a clock. */
 #define BM_CLOCK_MAX_UNIX_MS INT64_C(4102444800000)
+/* A synced clock never legitimately falls back by more than this.  A large
+ * backward offer is a bad anchor (e.g. a GGA read before its RMC date at UTC
+ * midnight, which is 24 h stale), and applying it would make the next correct
+ * offer look like a 24 h forward jump that wipes the LED queue. */
+#define BM_CLOCK_MAX_BACKWARD_MS INT64_C(3600000)
 
 typedef struct {
     portMUX_TYPE lock;
@@ -78,10 +83,12 @@ bool bm_clock_apply_anchor_time(int64_t utc_ms,
     if (previous_synced) {
         int64_t elapsed_us = mono_us - s_clock.base_mono_us;
         int64_t estimate_ms = s_clock.base_utc_ms + elapsed_us / 1000;
-        int64_t delta_ms = utc_ms - estimate_ms;
-        if (delta_ms < 0) {
-            delta_ms = -delta_ms;
+        int64_t signed_delta_ms = utc_ms - estimate_ms;
+        if (signed_delta_ms < -BM_CLOCK_MAX_BACKWARD_MS) {
+            portEXIT_CRITICAL(&s_clock.lock);
+            return false;
         }
+        int64_t delta_ms = signed_delta_ms < 0 ? -signed_delta_ms : signed_delta_ms;
         if (delta_ms < BM_CLOCK_MIN_CORRECTION_MS) {
             /* Every anchor of every positioning cycle offers a time, each with
              * its own transport jitter.  Re-basing on all of them would walk
