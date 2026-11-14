@@ -51,6 +51,12 @@ AWS 公式には Lightsail 専用の事前定義マネージドポリシーが�
 ./scripts/lightsail-deploy.sh --prod
 ```
 
+デプロイ後、Gateway を接続する前に Admin でログインし、**Gateway tokens** パネルで
+Gateway ごとのトークンを発行してください。トークンを 1 件も発行していない状態では
+`/api/gateway/*` と `/ws/gateway` はすべての接続を拒否します（デプロイ時に渡す共有
+トークンは廃止されました）。発行手順は [README](../README.md#gateway-トークンの発行) を
+参照してください。
+
 ### オプション一覧
 | オプション | 説明 | デフォルト値 |
 |---|---|---|
@@ -58,7 +64,6 @@ AWS 公式には Lightsail 専用の事前定義マネージドポリシーが�
 | `--prod` | 本番実機モード（シミュレーション停止、物理Gateway待受） | - |
 | `--bundle <ID>` | プラン指定（`small_3_0`: 2GB/$12/月, `micro_3_0`: 1GB/$7/月） | `small_3_0` |
 | `--key <PATH>` | SSH 秘密鍵パス | `~/.ssh/` 下の既存鍵を自動検出 |
-| `--token <TOKEN>` | Gateway 認証トークン | `GATEWAY_TOKEN` 環境変数または未設定 |
 | `--allow-cidr <CIDR>` | 5080ポート接続元の IP 制限（例: `219.104.138.249/32`） | 全開放 (`0.0.0.0/0`) |
 | `--name <NAME>` | Lightsail インスタンス名 | `balloonmesh-server` |
 

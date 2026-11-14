@@ -17,7 +17,7 @@ public sealed class RegressionTests
         var events = new RecordingMonitorEvents();
         var time = new TestTimeProvider(new DateTimeOffset(2026, 11, 8, 10, 0, 0, TimeSpan.Zero));
         var neighbors = new NeighborStore();
-        var registry = new GatewayRegistry(events);
+        var registry = TestRegistry.Create(events);
         var aggregator = new FtmAggregator(fleet, neighbors, new PositionSolver(), events, time,
             NullLogger<FtmAggregator>.Instance);
         var dispatch = new LedDispatchService(registry, fleet, database.Store, events, time,
@@ -50,7 +50,7 @@ public sealed class RegressionTests
     {
         using var database = new TemporaryDatabase();
         var services = CreateServices(database);
-        var registry = new GatewayRegistry(services.Events);
+        var registry = TestRegistry.Create(services.Events);
         registry.GetOrRegister("gw-test");
         var dispatch = new LedDispatchService(registry, services.Fleet, database.Store,
             services.Events, services.Time, NullLogger<LedDispatchService>.Instance);
@@ -151,7 +151,7 @@ public sealed class RegressionTests
     {
         using var database = new TemporaryDatabase();
         var services = CreateServices(database);
-        var registry = new GatewayRegistry(services.Events);
+        var registry = TestRegistry.Create(services.Events);
         registry.GetOrRegister("gw-test");
         var dispatch = new LedDispatchService(registry, services.Fleet, database.Store,
             services.Events, services.Time, NullLogger<LedDispatchService>.Instance);
@@ -210,7 +210,7 @@ public sealed class RegressionTests
         var id = database.Store.AddShowStep("sent", "balloon", "0x0101", at,
             1, 2, 3, "sent");
 
-        var registry = new GatewayRegistry(services.Events);
+        var registry = TestRegistry.Create(services.Events);
         var dispatcher = new LedDispatchService(registry, services.Fleet, database.Store,
             services.Events, services.Time, NullLogger<LedDispatchService>.Instance);
         var worker = new ShowRecoveryWorker(database.Store, services.Fleet, dispatcher,
@@ -231,7 +231,7 @@ public sealed class RegressionTests
         var at = services.Time.GetUtcNow().AddMinutes(2);
         var id = database.Store.AddShowStep("sent", "balloon", "0x0101", at,
             1, 2, 3, "sent");
-        var registry = new GatewayRegistry(services.Events);
+        var registry = TestRegistry.Create(services.Events);
         registry.GetOrRegister("gw-test");
         var dispatcher = new LedDispatchService(registry, services.Fleet, database.Store,
             services.Events, services.Time, NullLogger<LedDispatchService>.Instance);
@@ -279,7 +279,7 @@ public sealed class RegressionTests
     [Fact]
     public async Task UnprovisionedWebSocketGatewayIsNotCountedAsDelivery()
     {
-        var registry = new GatewayRegistry(new RecordingMonitorEvents());
+        var registry = TestRegistry.Create(new RecordingMonitorEvents());
         var generation = registry.AttachWebSocket("gw-test", null, "0.1.0",
             provisioned: false, spoolPending: 0, new ClientWebSocket(), new CancellationTokenSource());
         var command = new DownlinkCommand(0xC010, 1, [1], 7);
@@ -294,7 +294,7 @@ public sealed class RegressionTests
     [Fact]
     public async Task DetachedWebSocketGatewayIsNotTreatedAsAnHttpGateway()
     {
-        var registry = new GatewayRegistry(new RecordingMonitorEvents());
+        var registry = TestRegistry.Create(new RecordingMonitorEvents());
         var generation = registry.AttachWebSocket("gw-test", null, "0.1.0",
             provisioned: true, spoolPending: 0, new ClientWebSocket(), new CancellationTokenSource());
         var command = new DownlinkCommand(0xC010, 1, [1], 7);
@@ -308,7 +308,7 @@ public sealed class RegressionTests
     [Fact]
     public void ExplicitlyUnreadyHttpGatewayIsNotCounted()
     {
-        var registry = new GatewayRegistry(new RecordingMonitorEvents());
+        var registry = TestRegistry.Create(new RecordingMonitorEvents());
         var command = new DownlinkCommand(0xC010, 1, [1], 7);
         registry.Touch("gw-test");
         registry.UpdateRuntimeState("gw-test", provisioned: false, spoolPending: 0);
@@ -321,7 +321,7 @@ public sealed class RegressionTests
     [Fact]
     public void StaleWebSocketStateUpdateIsIgnored()
     {
-        var registry = new GatewayRegistry(new RecordingMonitorEvents());
+        var registry = TestRegistry.Create(new RecordingMonitorEvents());
         var oldGeneration = registry.AttachWebSocket("gw-test", null, "0.1.0",
             provisioned: true, spoolPending: 0, new ClientWebSocket(), new CancellationTokenSource());
         registry.AttachWebSocket("gw-test", null, "0.1.0", provisioned: true,
@@ -338,7 +338,7 @@ public sealed class RegressionTests
     [Fact]
     public async Task StaleWebSocketDetachDoesNotClearANewerConnection()
     {
-        var registry = new GatewayRegistry(new RecordingMonitorEvents());
+        var registry = TestRegistry.Create(new RecordingMonitorEvents());
         var oldGeneration = registry.AttachWebSocket("gw-test", null, "0.1.0",
             provisioned: true, spoolPending: 0, new ClientWebSocket(), new CancellationTokenSource());
         registry.AttachWebSocket("gw-test", null, "0.1.0", provisioned: true, spoolPending: 0, new ClientWebSocket(), new CancellationTokenSource());

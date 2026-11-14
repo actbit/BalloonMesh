@@ -97,7 +97,8 @@ balloon は XIAO ESP32C3 の **D0/D1/D2 (GPIO2/3/4)** を **LEDC 5kHz / 8bit** �
 - Balloon は起動時としきい値遷移時に実際の LED キュー件数を送信（周期送信なし、失敗時は再試行）
 - Balloon の BLE 近隣探索は測位サイクル開始から 20 秒窓で実行し、FTM が 3 局以上成功した場合は結果を破棄
 - Gateway は `BM_GATEWAY_TOKEN` を hello / `X-Gateway-Token` ヘッダで送信
-- サーバ側 `Gateway:Token` と一致しない接続は拒否
+- トークンはサーバの Admin UI で Gateway 単位に発行し、環境変数 `BM_GATEWAY_TOKEN` でビルドに渡す（リポジトリにトークンは置かない）
+- 発行済みトークンと一致しない接続、および発行対象以外の `BM_GATEWAY_ID` を名乗る接続は拒否
 - `balloon` / `gateway` は BLE Mesh 設定を NVS に保存し、再起動後も Provisioning 状態と group subscription を復元
 
 ## BLE Mesh Node のビルド構成

@@ -23,7 +23,6 @@ services:
       ConnectionStrings__BalloonMesh: "Host=postgres;Port=5432;Database=balloonmesh;Username=balloonmesh;Password=balloonmesh;Pooling=true;Maximum Pool Size=20"
       ASPNETCORE_URLS: "http://+:5080"
       Simulation__Enabled: "${SIMULATION_ENABLED:-true}"
-      Gateway__Token: "${GATEWAY_TOKEN:-}"
       Authentication__Mode: "${AUTH_MODE:-}"
       Authentication__Mock__Enabled: "${MOCK_AUTH_ENABLED:-false}"
       BALLOONMESH_ADMIN_PASSWORD: "${BALLOONMESH_ADMIN_PASSWORD:-}"

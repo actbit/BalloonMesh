@@ -16,13 +16,12 @@ set -euo pipefail
 #   --name <NAME>    インスタンス名（デフォルト: balloonmesh-server）
 #   --key <PATH>     SSH秘密鍵のパス（未指定時は ~/.ssh/ から自動検出）
 #   --bundle <ID>    プラン（small_3_0: 2GB/$12, micro_3_0: 1GB/$7。デフォルト: small_3_0）
-#   --token <TOKEN>  Gateway 認証トークン
 #   --allow-cidr <CIDR> 5080ポートの接続元IP制限（例: 219.104.138.249/32。未指定時は全開放）
 #
 # Examples:
 #   ./scripts/lightsail-deploy.sh                # デモモードで自動作成または更新
 #   ./scripts/lightsail-deploy.sh --prod         # 本番実機モードでデプロイ
-#   ./scripts/lightsail-deploy.sh --prod --token secret123 --allow-cidr 219.104.138.249/32
+#   ./scripts/lightsail-deploy.sh --prod --allow-cidr 219.104.138.249/32
 #   ./scripts/lightsail-deploy.sh --bundle micro_3_0  # $7/月の最小プランで作成
 # -----------------------------------------------------------------------------
 
@@ -30,7 +29,6 @@ INSTANCE_NAME="balloonmesh-server"
 KEY_PATH="${LIGHTSAIL_KEY:-}"
 BUNDLE_ID="small_3_0"
 MODE="--demo"
-GATEWAY_TOKEN="${GATEWAY_TOKEN:-}"
 ALLOW_CIDR=""
 REGION="${AWS_DEFAULT_REGION:-ap-northeast-1}"
 PORT="5080"
@@ -58,10 +56,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --bundle)
       BUNDLE_ID="$2"
-      shift 2
-      ;;
-    --token)
-      GATEWAY_TOKEN="$2"
       shift 2
       ;;
     --allow-cidr)
@@ -200,7 +194,7 @@ rsync -avz \
 
 # 3. コンテナのビルドと起動
 echo "==> コンテナをビルド・起動しています (SIMULATION_ENABLED=${SIMULATION_ENABLED})..."
-ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${HOST}" "cd ${REMOTE_DIR} && sudo SIMULATION_ENABLED=${SIMULATION_ENABLED} GATEWAY_TOKEN='${GATEWAY_TOKEN}' docker compose up -d --build"
+ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${HOST}" "cd ${REMOTE_DIR} && sudo SIMULATION_ENABLED=${SIMULATION_ENABLED} docker compose up -d --build"
 
 # 4. ヘルスチェック
 echo "==> デプロイの疎通確認中..."

@@ -165,7 +165,7 @@ Arduino を維持する場合の推奨確認手順:
 - 個体別 Provisioning UUID（Bluetooth MAC 由来）
 - Mesh 時刻フォールバック（TIME_REQUEST/TIME_REPORT、バルーングループ 0xC010）
 - Gateway の NVS オフラインスプール（128 件、再接続後に再送）
-- Gateway 共有トークン認証（hello / X-Gateway-Token）
+- Gateway 単位のトークン認証（hello / X-Gateway-Token）。Admin UI で発行・失効し、サーバはハッシュのみ保持
 - UI の Gateway 状態（prov/unprov、spool 件数、transport）
 - Cookie + OIDC / Discord 認証
 - Viewer / Operator / Admin のロールポリシー

@@ -15,7 +15,7 @@ public sealed class LedDispatchTests
         var fleet = new FleetService(database.Store);
         var events = new RecordingMonitorEvents();
         var time = new TestTimeProvider(new DateTimeOffset(2026, 11, 8, 10, 0, 0, TimeSpan.Zero));
-        var registry = new GatewayRegistry(events);
+        var registry = TestRegistry.Create(events);
         registry.GetOrRegister("gw-test");
         var filler = new DownlinkCommand(1, 1, [1], 7);
         for (var i = 0; i < 2048; i++) Assert.Equal(1, registry.Broadcast(filler));
@@ -36,7 +36,7 @@ public sealed class LedDispatchTests
         var fleet = new FleetService(database.Store);
         var events = new RecordingMonitorEvents();
         var time = new TestTimeProvider(new DateTimeOffset(2026, 11, 8, 10, 0, 0, TimeSpan.Zero));
-        var registry = new GatewayRegistry(events);
+        var registry = TestRegistry.Create(events);
         registry.GetOrRegister("gw-test");
         var dispatch = new LedDispatchService(registry, fleet, database.Store, events, time, NullLogger<LedDispatchService>.Instance);
         var target = fleet.ResolveTarget("balloon", "0x0101");
@@ -57,7 +57,7 @@ public sealed class LedDispatchTests
         var fleet = new FleetService(database.Store);
         var events = new RecordingMonitorEvents();
         var time = new TestTimeProvider(new DateTimeOffset(2026, 11, 8, 10, 0, 0, TimeSpan.Zero));
-        var registry = new GatewayRegistry(events);
+        var registry = TestRegistry.Create(events);
         var dispatch = new LedDispatchService(
             registry, fleet, database.Store, events, time, NullLogger<LedDispatchService>.Instance);
         var worker = new ShowRecoveryWorker(
@@ -76,7 +76,7 @@ public sealed class LedDispatchTests
         var fleet = new FleetService(database.Store);
         var events = new RecordingMonitorEvents();
         var time = new TestTimeProvider(new DateTimeOffset(2026, 11, 8, 10, 0, 0, TimeSpan.Zero));
-        var registry = new GatewayRegistry(events);
+        var registry = TestRegistry.Create(events);
         var dispatch = new LedDispatchService(
             registry, fleet, database.Store, events, time, NullLogger<LedDispatchService>.Instance);
         var target = fleet.ResolveTarget("all", "all");
@@ -104,7 +104,7 @@ public sealed class LedDispatchTests
         var fleet = new FleetService(database.Store);
         var events = new RecordingMonitorEvents();
         var time = new TestTimeProvider(new DateTimeOffset(2026, 11, 8, 10, 0, 0, TimeSpan.Zero));
-        var registry = new GatewayRegistry(events);
+        var registry = TestRegistry.Create(events);
         var dispatch = new LedDispatchService(
             registry, fleet, database.Store, events, time, NullLogger<LedDispatchService>.Instance);
         var commands = new CommandService(

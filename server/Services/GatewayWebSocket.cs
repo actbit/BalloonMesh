@@ -15,7 +15,7 @@ public static class GatewayWebSocket
         GatewayRegistry registry,
         MeshReportRouter router,
         ILogger logger,
-        string? expectedToken,
+        GatewayTokenStore tokens,
         CancellationToken cancellationToken)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(
@@ -48,25 +48,34 @@ public static class GatewayWebSocket
                                    spoolValue.TryGetInt32(out var spoolCount)
                     ? spoolCount
                     : 0;
-                if (!GatewayAuth.Matches(token, expectedToken))
+                if (string.IsNullOrWhiteSpace(gatewayId))
                 {
+                    await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation,
+                        "hello with gatewayId required", linked.Token);
+                    return;
+                }
+                // The token is issued for one gatewayId, so a gateway cannot
+                // claim another one's identity.
+                var auth = tokens.Authenticate(token, gatewayId);
+                if (!auth.Authorized)
+                {
+                    logger.LogWarning(
+                        "Rejected gateway WebSocket for {Gateway} from {Remote}: {Reason}",
+                        gatewayId, context.Connection.RemoteIpAddress, auth.Failure);
                     await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation,
                         "invalid gateway token", linked.Token);
                     return;
                 }
-                if (!string.IsNullOrWhiteSpace(gatewayId))
-                {
-                    connectionLifetime = CancellationTokenSource.CreateLinkedTokenSource(
-                        linked.Token);
-                    connectionGeneration = registry.AttachWebSocket(
-                        gatewayId,
-                        remote ?? context.Connection.RemoteIpAddress?.ToString(),
-                        firmware,
-                        provisioned,
-                        spoolPending,
-                        socket,
-                        connectionLifetime);
-                }
+                connectionLifetime = CancellationTokenSource.CreateLinkedTokenSource(
+                    linked.Token);
+                connectionGeneration = registry.AttachWebSocket(
+                    gatewayId,
+                    remote ?? context.Connection.RemoteIpAddress?.ToString(),
+                    firmware,
+                    provisioned,
+                    spoolPending,
+                    socket,
+                    connectionLifetime);
             }
             catch (JsonException exception)
             {

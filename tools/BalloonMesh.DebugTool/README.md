@@ -7,7 +7,7 @@ BalloonMesh サーバと BLE Mesh Gateway の動作を、実機なしで確認�
 
 ## 機能
 
-- **接続**: サーバ URL、Gateway 共有トークン、Session Cookie を指定。
+- **接続**: サーバ URL、Gateway トークン、Session Cookie を指定。
   Development 環境では Mock ログイン（Admin / Operator / Viewer）が使えます。
 - **Fleet**: バルーン一覧（位置・色・キュー・Online）、Gateway 一覧、
   予約済み Show step の表示とキャンセル。バルーンを選ぶと Commands タブの
@@ -49,8 +49,9 @@ dotnet run --project tools/BalloonMesh.DebugTool/BalloonMesh.DebugTool.csproj
 1. Server URL（既定 `http://localhost:5080`）を確認して **Connect**。
 2. Development サーバなら **Mock login** を押すか、
    別環境なら Session Cookie を貼り付けてから **Connect / Refresh**。
-3. Gateway 共有トークンが必要な環境では **Gateway token** を入力してください。
-   サーバが `Gateway:Token` を設定している場合、未設定・不一致の WebSocket は
+3. **Gateway token** に、サーバの Admin UI で発行したトークンを入力してください。
+   トークンは Gateway ID ごとに発行されるため、`--id` / Gateway ID は発行時に
+   指定したものと一致させる必要があります。未設定・不一致・別 ID のトークンは
    hello 直後に拒否され、Gateway simulator の Start は失敗として表示されます。
 
 ## 配布用ビルド

@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text.Json;
 using System.Threading.Channels;
+using BalloonMesh.Server.Data;
 using BalloonMesh.Server.Hubs;
 using BalloonMesh.Server.Models;
 
@@ -41,6 +42,17 @@ public sealed class GatewayClient
     public bool Provisioned { get; set; }
     public int SpoolPending { get; set; }
     public DateTimeOffset LastSeen { get; set; } = DateTimeOffset.UtcNow;
+
+    /// <summary>
+    /// True for a gateway restored from the database that has not connected
+    /// again yet.  Its stored LastSeen must not make it look like a live
+    /// delivery path, because nothing is reading its command channel.
+    /// </summary>
+    public bool Restored { get; set; }
+
+    /// <summary>Last write-through of this gateway's row, for throttling.</summary>
+    public DateTimeOffset PersistedAt { get; set; }
+    public string? PersistedState { get; set; }
     public int PendingCommands =>
         (Commands.Reader.CanCount ? Commands.Reader.Count : 0) + (WriterBusy ? 1 : 0);
 
@@ -59,22 +71,108 @@ public sealed class GatewayRegistry
     private readonly ConcurrentDictionary<string, GatewayClient> _clients = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _broadcastGate = new();
     private readonly IMonitorEvents _notifier;
+    private readonly IGatewayStateStore _store;
+    private readonly ILogger<GatewayRegistry> _logger;
 
-    public GatewayRegistry(IMonitorEvents notifier)
+    /// <summary>Minimum interval between last-seen-only row writes.</summary>
+    private static readonly TimeSpan PersistInterval = TimeSpan.FromSeconds(5);
+
+    public GatewayRegistry(IMonitorEvents notifier, IGatewayStateStore store,
+        ILogger<GatewayRegistry> logger)
     {
         _notifier = notifier;
+        _store = store;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Restores the known gateways at startup so the fleet list, firmware and
+    /// last-seen times survive a restart.  Live transport state is not
+    /// restored: a restored gateway counts as a delivery path only once it
+    /// connects or polls again.
+    /// </summary>
+    public void LoadFromStore()
+    {
+        foreach (var record in _store.GetGateways())
+        {
+            var client = _clients.GetOrAdd(record.Id, static key => new GatewayClient(key));
+            lock (client.ConnectionGate)
+            {
+                client.Remote = record.Remote;
+                client.Firmware = record.Firmware;
+                client.Provisioned = record.Provisioned;
+                client.SpoolPending = record.SpoolPending;
+                client.LastSeen = record.LastSeen;
+                client.Restored = true;
+                client.PersistedAt = record.LastSeen;
+                client.PersistedState = StateSignature(client);
+            }
+        }
     }
 
     public GatewayClient GetOrRegister(string id, string? firmware = null)
     {
         var client = _clients.GetOrAdd(id, static key => new GatewayClient(key));
         client.LastSeen = DateTimeOffset.UtcNow;
+        client.Restored = false;
         if (!string.IsNullOrWhiteSpace(firmware))
         {
             client.Firmware = firmware;
         }
+        Persist(client);
         return client;
     }
+
+    /// <summary>
+    /// Writes the gateway's durable fields.  A change to firmware, remote,
+    /// readiness or spool depth is written immediately; a last-seen-only
+    /// change is throttled so a long-polling gateway does not write per
+    /// request.
+    /// </summary>
+    private void Persist(GatewayClient client)
+    {
+        string? remote;
+        string? firmware;
+        bool provisioned;
+        int spoolPending;
+        DateTimeOffset lastSeen;
+        lock (client.ConnectionGate)
+        {
+            var signature = StateSignature(client);
+            var now = DateTimeOffset.UtcNow;
+            if (signature == client.PersistedState &&
+                now - client.PersistedAt < PersistInterval)
+            {
+                return;
+            }
+            client.PersistedState = signature;
+            client.PersistedAt = now;
+            remote = client.Remote;
+            firmware = client.Firmware;
+            provisioned = client.Provisioned;
+            spoolPending = client.SpoolPending;
+            lastSeen = client.LastSeen;
+        }
+        try
+        {
+            _store.UpsertGateway(client.Id, remote, firmware, provisioned,
+                spoolPending, lastSeen);
+        }
+        catch (Exception exception)
+        {
+            // Persistence must not fail a gateway request; the next write retries.
+            _logger.LogWarning(exception,
+                "Could not persist gateway {Gateway}", client.Id);
+            lock (client.ConnectionGate)
+            {
+                client.PersistedState = null;
+            }
+        }
+    }
+
+    private static string StateSignature(GatewayClient client) =>
+        string.Join('\u001f', client.Remote, client.Firmware,
+            client.Provisioned ? "1" : "0", client.SpoolPending);
 
     public long AttachWebSocket(string id, string? remote, string? firmware,
         bool provisioned, int spoolPending, WebSocket socket,
@@ -97,7 +195,9 @@ public sealed class GatewayRegistry
             client.WebSocketConnected = true;
             client.HasWebSocket = true;
             client.Remote = remote;
+            client.Restored = false;
         }
+        Persist(client);
         // Stop the previous receive loop; the single writer survives and will
         // pick up the new CurrentSocket.
         if (previous is not null)
@@ -139,6 +239,7 @@ public sealed class GatewayRegistry
                     client.LastSeen = DateTimeOffset.UtcNow;
                 }
             }
+            Persist(client);
         }
         await NotifyChangedAsync();
     }
@@ -175,6 +276,7 @@ public sealed class GatewayRegistry
                 changed = true;
             }
         }
+        Persist(client);
         if (changed)
         {
             _ = NotifyChangedAsync();
@@ -203,6 +305,7 @@ public sealed class GatewayRegistry
                 changed = true;
             }
         }
+        Persist(client);
         if (changed)
         {
             _ = NotifyChangedAsync();
@@ -218,6 +321,7 @@ public sealed class GatewayRegistry
             client.HasWebSocket = false;
             client.LastSeen = DateTimeOffset.UtcNow;
         }
+        Persist(client);
     }
 
     public void EndPoll(string id)
@@ -229,6 +333,7 @@ public sealed class GatewayRegistry
                 client.HttpPolling = false;
                 client.LastSeen = DateTimeOffset.UtcNow;
             }
+            Persist(client);
         }
     }
 
@@ -250,6 +355,7 @@ public sealed class GatewayRegistry
                 client.HasWebSocket = false;
             }
         }
+        Persist(client);
         if (isNew)
         {
             _ = NotifyChangedAsync();
@@ -268,6 +374,9 @@ public sealed class GatewayRegistry
             // polling must not make a command look delivered.
             var httpCutoff = now.AddSeconds(-5);
             var clients = _clients.Values
+                // A gateway restored from the database has no reader on its
+                // command channel until it connects again.
+                .Where(client => !client.Restored)
                 .Where(client => client.HasWebSocket
                     // A detached WebSocket gateway must not fall back to the
                     // HTTP "recently seen" rule: its old channel has no reader.
