@@ -73,8 +73,8 @@ balloon は XIAO ESP32C3 の **D0/D1/D2 (GPIO2/3/4)** を **LEDC 5kHz / 8bit** �
   - 基準局 SSID / UDP ポート / トークン
   - LED GPIO
   - Group Address / Model ID / Company ID
-- `balloon` 環境は通常ファームウェアとして `BM_ENABLE_POSITIONING=1`（Protocol A / FTM有効）でビルドする。
-- `balloon-mesh-bringup` 環境は `BM_ENABLE_POSITIONING=0`（Wi-Fi/FTM無効）で、BLE Meshだけを確認するときに使う。
+- `balloon` 環境は通常ファームウェアとして `BM_ENABLE_POSITIONING=1`（Protocol A / FTM有効）でビルドする。起動後に BOOT ボタンを3秒長押しするとNVSを消去できる。
+- `balloon-mesh-bringup` 環境は `BM_ENABLE_POSITIONING=0`（Wi-Fi/FTM無効）で、BLE Meshだけを確認するときに使う。開発用自動provisioningが有効になり、ユニキャストアドレスはBluetooth MACから自動生成される。
 
 ### anchor
 - `platformio.ini` の `-DBM_ANCHOR_ID=N`
@@ -83,8 +83,49 @@ balloon は XIAO ESP32C3 の **D0/D1/D2 (GPIO2/3/4)** を **LEDC 5kHz / 8bit** �
 ### gateway
 - `platformio.ini` の `BM_GATEWAY_USE_WEBSOCKET=1`（既定）
   - `0` にすると HTTP ポーリングへ切り替え
-- `bm_config.h` の `BM_GATEWAY_ID` / `BM_SERVER_URL` / Wi-Fi 設定
-- WSS/HTTPS の CA は `-DBM_TLS_CA_CERT=\"...\"` で指定
+- `gateway` / `gateway-dev` 環境は起動後に BOOT ボタンを3秒長押しするとNVSを消去できる。両環境ともGateway自身が標準Provisionerとして動作し、Wi-FiでサーバーからGatewayアドレスとノード範囲を取得する。ノード範囲は最初の64アドレスを使い切ると16アドレスずつ追加されるため、開発用と本番用でProvisionerの動作差はありません。
+- Gateway IDはBluetooth MACから自動生成される。再現性が必要なテストや既存設備との互換性が必要な場合だけ `BM_GATEWAY_ID` をbuild flagで上書きする。
+- 接続先は環境変数 `BM_SERVER_URL` でビルド時に指定する（空なら起動を拒否）。
+- **本番 `gateway` 環境**（`BM_PRODUCTION_BUILD=1`）
+  - `https://` 以外の接続先では起動しない。
+  - CAは既定でLet's Encryptのルート（ISRG Root X1/X2、`bm_letsencrypt_roots.h`）を使う。
+  - Let's Encrypt以外のCAを使う場合だけ、`firmware/shared/balloon_common/include/bm_server_ca.h`（git管理外）に `#define BM_TLS_CA_CERT "-----BEGIN CERTIFICATE-----\n..."` を置いて上書きする。
+  - HTTPS/WSS ともCAチェーンとホスト名を検証する。
+- **Mesh鍵**
+  - 本番のNetKey/AppKeyはサーバーがデプロイごとに乱数生成し、DBの `mesh_network_keys` に保存する。Gatewayは `mesh-address` の応答で受け取る。
+  - 鍵を受け取れるのは、そのGateway自身のAPIキーで認証したときだけ（共有 `Gateway:Token` では受け取れない）。
+  - 各ノードのDevKeyはProvisioning時にECDHで個別に生成される。
+  - 鍵はDBにしかないので、**DBのバックアップは必須**。DBを失うと既存ネットワークの鍵も失われる。
+  - Gatewayは一度NVSに保存した鍵を優先し、サーバーの鍵と異なればエラーログを出す。鍵を変えるにはNVS消去と再Provisioningが必要（Key Refreshは未実装）。
+- **`gateway-dev` / `balloon-mesh-bringup`**
+  - 全デバイス共通の開発用テスト鍵と `http://` を使う。本番へは投入しない。
+  - `BM_PRODUCTION_BUILD` と同時には有効にできない（ビルドエラー）。
+- **Provisioning**
+  - Provisioningは1台ずつ直列に行う。
+  - 各ノードの設定（AppKey追加とモデルBind）はノードごとのジョブとして管理する。失敗しても破棄せず、バックオフしながら再試行し続ける。
+  - 起動時にはNVSに保存済みの全ノードについて設定をやり直すので、設定の途中で電源が落ちても復旧する。
+- Gateway APIキーはサーバーのAdmin画面でGateway IDごとに発行する。発行直後に表示された平文を保存し、ローカルのビルド時だけ `BM_GATEWAY_TOKEN` として渡す。キーはサーバー側ではハッシュのみ保存され、1 Gatewayにつき有効キーは1本（再発行時に旧キーは失効）である。
+
+```powershell
+$env:BM_GATEWAY_TOKEN = "bm_live_..."
+$env:BM_SERVER_URL = "https://balloon.example.com"
+$env:BM_WIFI_SSID = "..."
+$env:BM_WIFI_PASS = "..."
+cd firmware/gateway
+pio run -e gateway
+pio run -e gateway -t upload
+```
+
+`BM_GATEWAY_TOKEN` はソースへコミットしない。
+
+**サーバー側の認証**
+- APIキー発行済みのGatewayは、自分のAPIキーでしか認証できない。共有の `Gateway:Token`、空キー、別Gatewayのキーはすべて拒否される。
+- `Gateway:Token` は移行用の共有キーで、キー未発行のGatewayにだけ有効。これで認証したGatewayはイベント送受信だけができ、Meshアドレスの払い出しとMesh鍵の取得はできない。
+- 無認証の接続は `Gateway:AllowUnkeyedGateways=true`（開発用）のときだけ受け付ける。
+
+BOOTを押したままリセットするとESP32-C3のROM書き込みモードに入るため、NVS消去は通常起動後に実行する。
+
+MeshアドレスはGateway自身が `0x0001-0x00FF`、バルーンなどのノードが `0x0100-0x3FFF` を使う。Gateway自身のアドレスとノード範囲はサーバーの台帳で個体ごとに安定して予約され、複数Gatewayの範囲は重複しない。サーバーに既登録のバルーンアドレスも範囲予約から除外される。同じProvisioning UUIDを2台が検出した場合は先に取得したGatewayだけがProvisioningし、もう一方はサーバーの競合応答で処理を中止する。
 
 ## 追加実装
 
@@ -93,9 +134,10 @@ balloon は XIAO ESP32C3 の **D0/D1/D2 (GPIO2/3/4)** を **LEDC 5kHz / 8bit** �
 - Gateway は未送信 Mesh イベントを NVS に最大 128 件保持し、WebSocket/HTTP 再接続後に再送。`ageMs` で滞留時間を通知する
 - Balloon は起動時としきい値遷移時に実際の LED キュー件数を送信（周期送信なし、失敗時は再試行）
 - Balloon の BLE 近隣探索は測位サイクル開始から 20 秒窓で実行し、FTM が 3 局以上成功した場合は結果を破棄
-- Gateway は `BM_GATEWAY_TOKEN` を hello / `X-Gateway-Token` ヘッダで送信
-- サーバ側 `Gateway:Token` と一致しない接続は拒否
+- Gateway は `BM_GATEWAY_TOKEN` を hello / `X-Gateway-Token` ヘッダで送信し、サーバーはGateway IDと組み合わせて検証
+- サーバー管理画面で発行したAPIキーは、発行直後に一度だけ表示される
 - `balloon` / `gateway` は BLE Mesh 設定を NVS に保存し、再起動後も Provisioning 状態と group subscription を復元
+- `gateway` / `gateway-dev` は `POST /api/gateway/{id}/mesh-address` でGatewayアドレスを取得し、検出したノードごとに `POST /api/gateway/{id}/mesh-node-address` でサーバー払い出しのユニキャストアドレスを使ってProvisioningする
 
 ## BLE Mesh Node のビルド構成
 

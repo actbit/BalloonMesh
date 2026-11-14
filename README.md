@@ -219,8 +219,22 @@ Cookie 認証を基盤に、OIDC と Discord OAuth2 を利用できます。UI�
 
 - 保護された API は未ログインで `401`、権限不足で `403`（`/api/health`、`/favicon.ico`、認証エンドポイントは公開）
 - 未ログインのページは `/login` へリダイレクト
-- Gateway の `/api/gateway/*` と `/ws/gateway` はユーザー認証ではなく `Gateway:Token` で認証
+- Gateway の `/api/gateway/*` と `/ws/gateway` はユーザー認証ではなく、Gateway ID に紐づく API キー（`X-Gateway-Token` / WebSocket hello の `token`）で認証
 - SignalR `/hubs/monitor` は Viewer 以上を要求
+
+### Gateway API キー
+
+Admin でログインすると、Web UI の **Gateway API keys** パネルから Gateway ごとの API キーを発行・失効できます。1 Gateway につき有効キーは 1 本で、再発行すると旧キーは自動的に失効します。キーの平文は発行直後に一度だけ表示され、サーバーにはハッシュだけが保存されます。
+
+認証時は、Gateway が送る `gatewayId`（HTTP の URL パラメータまたは WebSocket hello）と API キーを組み合わせて照合します。キー発行済みの Gateway A のキーを、キー発行済みの Gateway B の ID で使うことはできません。管理画面で発行したキーを、Gateway のローカルビルド時に `BM_GATEWAY_TOKEN` として設定してください。
+
+```powershell
+$env:BM_GATEWAY_TOKEN = "bm_live_..."
+cd firmware/gateway
+pio run -e gateway
+```
+
+`Gateway:Token` は既存環境からの移行用の全 Gateway 共通キーです。個別 API キーで運用する本番環境では空にしてください。キー未発行の Gateway は既定で拒否されます。開発・初回登録用に `Gateway:AllowUnkeyedGateways` を `true` にした場合（`appsettings.Development.json` では有効）に限り、`Gateway:Token` も空なら認証なしで通します。本番では `false` のままにしてください。API キーを発行した Gateway は、空キーや誤ったキーを拒否します。
 
 ### OIDC
 
@@ -281,14 +295,16 @@ dotnet run --project server/BalloonMesh.Server.csproj --urls http://localhost:50
 
 ## オンボーディング表示（MOCK）
 
-実機 BLE Mesh Provisioner はまだ未実装のため、Web UI に **Admin 専用の MOCK オンボーディングパネル**を表示します。
+実機 Gateway は BLE Mesh Provisioner として自動動作します。Web UI の **Admin 専用 MOCK オンボーディングパネル**は、実機なしで画面を確認するための別系統のシミュレーションです。
 
 - `GET /api/onboarding/mock` — モックデバイス一覧
 - `POST /api/onboarding/mock/{id}/provision` — 数秒かけて `unprovisioned → provisioning → provisioned` をシミュレーション
 - `POST /api/onboarding/mock/reset` — 初期状態へ戻す
 - SignalR `onboardingUpdated` で接続中の全クライアントに反映（REST API は Admin のみ）
 
-実際の Provisioner 本体 / 鍵配布 / model bind / グループ購読の自動化は未実装です（ファームウェアは Provision 完了後に固定グループへ subscribe します）。
+実機の割り当てはサーバーが一元管理します。`POST /api/gateway/{id}/mesh-address` でGateway自身のユニキャストアドレスとノード範囲を払い出し、`POST /api/gateway/{id}/mesh-node-address` でUUIDごとの安定したノードアドレスを払い出します。各Gatewayは最初に64アドレス、使い切ると16アドレスずつ追加され、複数Gateway間で範囲は重複しません。既存の `balloons` 台帳に登録済みのMeshアドレスも予約範囲から除外します。同じUUIDを別Gatewayが先に取得済みならHTTP 409となり、二重Provisioningを防ぎます。
+
+Web UI のGatewayパネルでは、Gatewayアドレス、払い出し済み範囲、範囲ごとの使用数を確認できます。
 
 ### 5. ファームウェア
 
@@ -312,9 +328,9 @@ pio run -t upload
 |---|---|---|
 | `firmware/balloon` | バルーン | Wi-Fi FTM Initiator、BLE Mesh Node、RGB LEDC |
 | `firmware/anchor` | GPS 基準局 | NMEA UART、SoftAP、FTM Responder、UDP |
-| `firmware/gateway` | Mesh Gateway | BLE Mesh Node、WebSocket（既定）/ HTTP ポーリング |
+| `firmware/gateway` | Mesh Gateway / Provisioner | BLE Mesh Provisioner、WebSocket（既定）/ HTTP ポーリング |
 
-`anchor` は `platformio.ini` の `-DBM_ANCHOR_ID=N` で ID を変えてビルドします。`gateway` は `firmware/shared/balloon_common/include/bm_config.h` の `BM_GATEWAY_ID` / `BM_SERVER_URL` / Wi-Fi 設定（または `platformio.ini` の `-D` 上書き）を環境に合わせて変更してください。`balloon` は通常の `balloon` 環境に加え、測位を無効化した BLE Mesh 立ち上げ用の `balloon-mesh-bringup` 環境も利用できます。
+`anchor` は `platformio.ini` の `-DBM_ANCHOR_ID=N` で ID を変えてビルドします。`gateway` のIDはBluetooth MACから自動生成され、必要な場合だけ `firmware/shared/balloon_common/include/bm_config.h` の `BM_GATEWAY_ID` / `BM_SERVER_URL` / Wi-Fi 設定（または `platformio.ini` の `-D` 上書き）を変更してください。`balloon` は通常の `balloon` 環境に加え、測位を無効化した BLE Mesh 立ち上げ用の `balloon-mesh-bringup` 環境も利用できます。
 
 一括ビルド:
 
@@ -372,7 +388,7 @@ pio run -t upload
 - BLE Mesh 設定の NVS 永続化（アドレス・鍵・model bind・group subscription・SEQ/RPL）
 - 基準局が使えない場合の Mesh 時刻フォールバック（TIME_REQUEST/TIME_REPORT。バルーン間で交換し、サーバは透過転送のみ）
 - Gateway の NVS オフラインスプール（128 件、再接続後に再送）
-- Gateway 共有トークン認証（`Gateway:Token` / `X-Gateway-Token`）
+- Gateway ごとの API キー認証（`gateway_api_keys` / `X-Gateway-Token`）
 - UI の Gateway 状態（prov/unprov、spool 件数、transport）
 
 ### SvelteSharp Client モード
@@ -439,21 +455,23 @@ FTM_REPORT の 4B timestamp は、確定仕様で未決定のため **LED tick40
 - `anchors` — 基準局座標・時刻有効性
 - `positions` — 測位履歴（UI には測定時刻を表示しない）
 - `show_steps` — 予約コマンドの履歴
+- `gateway_api_keys` — Gateway ごとの API キー（平文ではなくハッシュを保存）
 
-接続文字列は `ConnectionStrings:BalloonMesh`、テスト用スキーマは `Data:Schema` で指定します。Gateway:Token を設定すると Gateway の WebSocket hello / HTTP ヘッダ（`X-Gateway-Token`）が一致しない接続を拒否します。
+接続文字列は `ConnectionStrings:BalloonMesh`、テスト用スキーマは `Data:Schema` で指定します。Gateway の API キーは `gateway_api_keys` にハッシュとして保存され、管理者だけが管理画面から発行・失効できます。Gateway の WebSocket hello / HTTP ヘッダ（`X-Gateway-Token`）は URL の Gateway ID に紐づけて検証されます。
 
 ---
 
 ## 既知の制約・注意
 
-1. **BLE Mesh Node のビルド構成**
-   `balloon` と `gateway` は `framework = arduino, espidf` とし、ESP-IDF 4.4.7 を Arduino のコンポーネントとして組み込みます。`sdkconfig.defaults` で `CONFIG_BLE_MESH_NODE=y` と `CONFIG_BLE_MESH_SETTINGS=y` を有効にして Bluetooth スタックをソースからビルドするため、Arduino 同梱のプリビルド `libbt.a` は使いません。`balloon` はさらに `CONFIG_ESP_WIFI_FTM_ENABLE=y` / `CONFIG_ESP_WIFI_FTM_INITIATOR_SUPPORT=y` を有効にします。`-DCONFIG_BLE_MESH_NODE=1` も不要です。Provisioning 情報（ユニキャストアドレス、NetKey/AppKey、model bind、group subscription、SEQ/RPL）は NVS に保存され、再起動後も復元されます。初回ビルドは ESP-IDF 全体を作るため時間がかかりますが、2 回目以降は差分ビルドになります。詳細は [firmware/README.md](firmware/README.md) と [docs/decisions.md](docs/decisions.md) の項目 12 を参照してください。
+1. **BLE Mesh Node / Provisioner のビルド構成**
+   `balloon` と `gateway` は `framework = arduino, espidf` とし、ESP-IDF 4.4.7 を Arduino のコンポーネントとして組み込みます。`sdkconfig.defaults` で `CONFIG_BLE_MESH_NODE=y`、`CONFIG_BLE_MESH_PROVISIONER=y`、`CONFIG_BLE_MESH_CFG_CLI=y`、`CONFIG_BLE_MESH_SETTINGS=y` を有効にして Bluetooth スタックをソースからビルドするため、Arduino 同梱のプリビルド `libbt.a` は使いません。Provisioning 情報（ユニキャストアドレス、NetKey/AppKey、model bind、group subscription、SEQ/RPL）は NVS に保存され、再起動後も復元されます。初回ビルドは ESP-IDF 全体を作るため時間がかかりますが、2 回目以降は差分ビルドになります。詳細は [firmware/README.md](firmware/README.md) と [docs/decisions.md](docs/decisions.md) の項目 12 を参照してください。
 2. **Gateway の Protocol C**  
-   サーバは WebSocket と HTTP ポーリングの両方を実装しています。Arduino Gateway は既定で WebSocket（`BM_GATEWAY_USE_WEBSOCKET=1`）を使用し、`BM_SERVER_URL` が `https://` の場合は WSS になります。HTTP ポーリングへ戻す場合は `platformio.ini` のフラグを 0 にしてください。CA を `BM_TLS_CA_CERT` で指定しない場合は証明書ピン留めなしになるため、本番では必ず CA を設定してください。
+   サーバは WebSocket と HTTP ポーリングの両方を実装しています。Arduino Gateway は既定で WebSocket（`BM_GATEWAY_USE_WEBSOCKET=1`）を使用し、`BM_SERVER_URL` が `https://` の場合は WSS になります。HTTP ポーリングへ戻す場合は `platformio.ini` のフラグを 0 にしてください。本番 `gateway` 環境は `https://` が必須で、証明書チェーンとホスト名を検証します。CA は既定で Let's Encrypt のルート（ISRG Root X1/X2）を内蔵しており、別の CA を使う場合だけ `bm_server_ca.h` で `BM_TLS_CA_CERT` を上書きします。`http://` や検証なしの TLS は `gateway-dev`（`BM_ALLOW_INSECURE_TRANSPORT=1`）でのみ使えます。
 3. **FTM timestamp** と **NEIGHBOR_REPORT の 2 件/パケット** は仕様未確定のため暫定値です。実装凍結前に [docs/decisions.md](docs/decisions.md) の項目を確定してください。
 4. **即時命令の順序**  
    `LED_SET_NOW` の `issued_tick` と `LED_RESET_AND_SET` の `cutoff` は意味が異なるため、相互の新旧比較は行いません。遅延到着時の色戻りリスクは仕様どおり残ります。
 5. **LED_CANCEL の tombstone** は 64 件のリングバッファです。大量のキャンセルを長時間保持する要件がある場合は拡張が必要です。
 6. **デモシミュレーション** はサーバ内で FTM 報告を合成します。実機 Gateway がない状態でも UI と集約ロジックを確認できますが、電波・Mesh の実特性は再現しません。
 7. **UI の CDN 依存**  MapLibre GL JS と SignalR ブラウザクライアントは CDN から遅延ロードします。閉域網ではこれらのファイルを `wwwroot` 等に配置し、`Home.svelte` の URL を差し替えてください。
-8. **認証**  Gateway の共有トークン認証（`Gateway:Token`）は実装済みです。Protocol A は 8B 共有トークンのみ、WSS は CA 未設定時に証明書ピン留めなしです。本番では TLS 証明書検証 / トークンローテーション / 署名付きコマンドを追加してください。
+8. **認証**  Gateway ごとの API キー発行・失効（`gateway_api_keys` / `X-Gateway-Token`）を実装済みです。`Gateway:Token` は移行用の共有キーとして残しています。本番では TLS 証明書検証を有効にし、キー発行後は共有キーを空にしてください。Protocol A は 8B 共有トークンのみ、WSS は CA 未設定時に証明書ピン留めなしです。
+9. **Provisioner 鍵**  現在のGateway Provisionerは開発と本番の動作差を減らすため共有のプロトタイプ鍵を使用しています。本番投入前にNetKey/AppKeyを安全なNVS領域またはデバイス固有のProvisioning経路へ移し、鍵ローテーションを追加してください。

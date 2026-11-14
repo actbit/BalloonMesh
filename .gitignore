@@ -30,10 +30,12 @@ third_party/SvelteSharp/**/obj/
 TestResults/
 *.log
 .worktrees/
-scripts/watch_*.py
 
 # Secrets & Environment files
 .env
 .env.*
 !.env.example
 cookies.txt
+
+# Server CA for gateway TLS (deployment specific)
+firmware/shared/balloon_common/include/bm_server_ca.h

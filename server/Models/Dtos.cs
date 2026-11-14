@@ -151,6 +151,12 @@ public sealed record GatewayCommandDto(ushort Dst, uint Opcode, string Payload, 
 
 public sealed record GatewayCommandsRequest(IReadOnlyList<GatewayCommandDto> Commands);
 
+public sealed record GatewayMeshAddressRequest(string DeviceUuid);
+
+public sealed record GatewayMeshNodeAddressRequest(string DeviceUuid);
+
+public sealed record GatewayApiKeyIssueRequest(string GatewayId);
+
 public sealed record DownlinkCommand(ushort Dst, uint Opcode, byte[] Payload, int Ttl)
 {
     public GatewayCommandDto ToDto() => new(Dst, Opcode, Convert.ToHexString(Payload), Ttl);

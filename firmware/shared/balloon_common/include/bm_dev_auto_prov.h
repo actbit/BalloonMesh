@@ -1,6 +1,22 @@
 #pragma once
 
+#include "bm_config.h"
+
+/*
+ * Development-only Mesh bring-up.
+ *
+ * The fixed NetKey/AppKey/DevKey below exist ONLY in BM_DEV_AUTO_PROV builds
+ * (gateway-dev / balloon-mesh-bringup), so a production image never contains
+ * a key that is shared by every device.  Production networks get their
+ * NetKey/AppKey from the server (generated per deployment, see
+ * DataStore.GetOrCreateMeshNetworkKeys) and each node receives its own
+ * DevKey through PB-ADV/PB-GATT provisioning (ECDH).
+ */
 #if defined(BM_DEV_AUTO_PROV) && BM_DEV_AUTO_PROV
+
+#if defined(BM_PRODUCTION_BUILD) && BM_PRODUCTION_BUILD
+#error "BM_DEV_AUTO_PROV embeds shared development Mesh keys and must not be enabled in a production build"
+#endif
 
 #include <stdint.h>
 #include <string.h>
@@ -9,7 +25,6 @@
 #include "esp_ble_mesh_provisioning_api.h"
 #include "test.h"
 #include "mesh_main.h"
-#include "bm_config.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -37,6 +52,7 @@ static const uint8_t BM_DEV_DEV_KEY[16] = {
  * group_addr is subscribed.
  */
 static inline int bm_dev_auto_provision(uint16_t unicast_addr, uint16_t group_addr) {
+    ESP_LOGW("bm_dev_prov", "DEVELOPMENT build: joining Mesh with shared test keys");
     ESP_LOGI("bm_dev_prov", "bm_dev_auto_provision entering: prov=%d addr=0x%04x",
              (int)esp_ble_mesh_node_is_provisioned(), unicast_addr);
 

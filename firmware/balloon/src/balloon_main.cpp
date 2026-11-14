@@ -10,6 +10,7 @@
 #include "balloon_neighbor_link.h"
 #include "balloon_time_link.h"
 #include "bm_config.h"
+#include "bm_nvs_reset.h"
 #if BM_ENABLE_POSITIONING
 #include "balloon_positioning.h"
 #endif
@@ -32,10 +33,12 @@ void setup() {
     esp_log_level_set("*", ESP_LOG_INFO);
     ESP_LOGI(TAG, "BalloonMesh balloon firmware %s starting...", BM_FIRMWARE_VERSION);
 
-#if defined(BM_DEV_AUTO_PROV) && BM_DEV_AUTO_PROV
-    ESP_LOGW(TAG, "BM_DEV_AUTO_PROV enabled: erasing NVS");
-    ESP_ERROR_CHECK(nvs_flash_erase());
-#endif
+    bool reset_nvs = bm_nvs_reset_pending();
+    if (reset_nvs) {
+        ESP_LOGW(TAG, "BOOT requested NVS erase");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        bm_nvs_reset_clear();
+    }
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -43,6 +46,7 @@ void setup() {
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    bm_check_boot_button_nvs_reset(TAG);
 
     bm_clock_init();
     bm_led_output_init();
@@ -58,6 +62,8 @@ void setup() {
 }
 
 void loop() {
+    bm_check_boot_button_nvs_reset(TAG);
+
     static uint32_t last = 0;
     uint32_t now = millis();
     if ((uint32_t)(now - last) >= 30000u) {
@@ -73,5 +79,5 @@ void loop() {
                  (int)state.clock_synced, state.count,
                  state.current.r, state.current.g, state.current.b);
     }
-    delay(1000);
+    delay(100);
 }
