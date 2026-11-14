@@ -30,6 +30,19 @@
     {/if}
 
     <div class="providers">
+      {#if model.localEnabled}
+        <form class="local-login" method="post" action="/auth/login/local">
+          <label>
+            <span>Username</span>
+            <input name="username" autocomplete="username" required />
+          </label>
+          <label>
+            <span>Password</span>
+            <input name="password" type="password" autocomplete="current-password" required />
+          </label>
+          <button type="submit">Sign in</button>
+        </form>
+      {/if}
       {#if model.oidcEnabled}
         <a class="provider primary" href="/auth/login/oidc">
           <span class="provider-icon">◎</span>
@@ -116,6 +129,23 @@
   }
 
   .providers { display: flex; flex-direction: column; gap: 10px; }
+  .local-login {
+    display: flex; flex-direction: column; gap: 10px;
+    padding: 16px; border-radius: 14px;
+    border: 1px solid rgba(56, 189, 248, 0.4);
+    background: rgba(15, 23, 42, 0.7);
+  }
+  .local-login label { display: flex; flex-direction: column; gap: 5px; }
+  .local-login label span { font-size: 11px; color: #94a3b8; }
+  .local-login input {
+    width: 100%; padding: 10px 11px; border-radius: 9px;
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    background: rgba(2, 6, 23, 0.8); color: #e2e8f0;
+  }
+  .local-login button {
+    margin-top: 4px; padding: 11px; border: 0; border-radius: 9px;
+    background: #38bdf8; color: #082f49; font-weight: 700; cursor: pointer;
+  }
   .provider {
     display: flex; align-items: center; gap: 14px;
     padding: 14px 16px; border-radius: 14px;

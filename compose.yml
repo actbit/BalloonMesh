@@ -24,7 +24,10 @@ services:
       ASPNETCORE_URLS: "http://+:5080"
       Simulation__Enabled: "${SIMULATION_ENABLED:-true}"
       Gateway__Token: "${GATEWAY_TOKEN:-}"
-      Authentication__Mock__Enabled: "${MOCK_AUTH_ENABLED:-true}"
+      Authentication__Mode: "${AUTH_MODE:-Local}"
+      Authentication__Mock__Enabled: "${MOCK_AUTH_ENABLED:-false}"
+      BALLOONMESH_ADMIN_PASSWORD: "${BALLOONMESH_ADMIN_PASSWORD:-}"
+      BALLOONMESH_OPERATOR_PASSWORD: "${BALLOONMESH_OPERATOR_PASSWORD:-}"
     depends_on:
       postgres:
         condition: service_healthy

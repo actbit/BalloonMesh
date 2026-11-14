@@ -209,7 +209,9 @@ dotnet run --project $cli -- protocol decode --opcode 0xC102E5 --payload E821F8B
 
 ## 認証・認可
 
-Cookie 認証を基盤に、OIDC と Discord OAuth2 を利用できます。UI、REST API、SignalR はロールポリシーで保護されます。
+Cookie 認証を基盤に、ローカルユーザー（ASP.NET Core Identity）、OIDC、Discord OAuth2 のいずれか1つを選択して利用できます。UI、REST API、SignalR はロールポリシーで保護されます。
+
+認証方式は `Authentication:Mode` で排他的に選びます。`Local`、`Oidc`、`Discord`、`Mock` の同時有効化はできません。
 
 | ポリシー | ロール | 用途 |
 |---|---|---|
@@ -228,6 +230,7 @@ Cookie 認証を基盤に、OIDC と Discord OAuth2 を利用できます。UI�
 
 ```json
 "Authentication": {
+  "Mode": "Oidc",
   "Oidc": {
     "Authority": "https://your-idp.example/realms/balloonmesh",
     "ClientId": "balloonmesh-web",
@@ -248,6 +251,7 @@ Cookie 認証を基盤に、OIDC と Discord OAuth2 を利用できます。UI�
 
 ```json
 "Authentication": {
+  "Mode": "Discord",
   "Discord": {
     "ClientId": "...",
     "ClientSecret": "...",
@@ -262,9 +266,43 @@ Cookie 認証を基盤に、OIDC と Discord OAuth2 を利用できます。UI�
 - `identify` / `email` スコープ
 - Discord ユーザー ID で Admin / Operator を付与
 
+### ローカルユーザー名・パスワード
+
+`Authentication:Mode` を `Local` にし、複数ユーザーを `Authentication:Local:Users` に追加します。ASP.NET Core Identityのテーブルは起動時にマイグレーションされ、設定されたユーザーは初回起動時にDBへ作成されます。初期パスワードは設定ファイルに置かず、`PasswordEnvironmentVariable` で指定した環境変数から読み込みます。
+
+```json
+"Authentication": {
+  "Mode": "Local",
+  "Local": {
+    "Enabled": true,
+    "Users": [
+      {
+        "Username": "admin",
+        "DisplayName": "管理者",
+        "Role": "Admin",
+        "PasswordEnvironmentVariable": "BALLOONMESH_ADMIN_PASSWORD"
+      },
+      {
+        "Username": "operator",
+        "DisplayName": "運用担当",
+        "Role": "Operator",
+        "PasswordEnvironmentVariable": "BALLOONMESH_OPERATOR_PASSWORD"
+      }
+    ]
+  }
+}
+```
+
+利用可能なロールは `Viewer`、`Operator`、`Admin` です。ユーザー追加・表示名・ロール変更は設定反映のためサーバーを再起動してください。既存ユーザーのパスワードはDB側を維持します。
+
+```powershell
+$env:BALLOONMESH_ADMIN_PASSWORD = "use-a-secret-value"
+$env:BALLOONMESH_OPERATOR_PASSWORD = "use-another-secret-value"
+```
+
 ### ローカル開発用ログイン
 
-`appsettings.Development.json` で `Authentication:Mock:Enabled=true` にすると `/auth/login/mock` が使えます。
+`appsettings.Development.json` で `Authentication:Mode=Mock` と `Authentication:Mock:Enabled=true` にすると `/auth/login/mock` が使えます。
 
 ```powershell
 $env:ASPNETCORE_ENVIRONMENT = "Development"

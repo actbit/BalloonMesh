@@ -8,6 +8,8 @@ using BalloonMesh.Server.Services;
 using SvelteSharp;
 using SvelteSharp.AspNetCore;
 using SvelteSharp.Jint;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -17,6 +19,15 @@ builder.Services
         options.PayloadSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase);
 
 builder.Services.AddBalloonMeshAuth(builder.Configuration, builder.Environment);
+var identityConnectionString = builder.Configuration.GetConnectionString("BalloonMesh")
+    ?? Environment.GetEnvironmentVariable("BALLOONMESH_CONNECTION")
+    ?? Environment.GetEnvironmentVariable("DATABASE_URL")
+    ?? "Host=127.0.0.1;Port=5432;Database=balloonmesh;Username=balloonmesh;Password=balloonmesh;Pooling=true;Maximum Pool Size=20";
+builder.Services.AddDbContext<BalloonMeshIdentityDbContext>(options =>
+    options.UseNpgsql(identityConnectionString));
+builder.Services.AddIdentityCore<ApplicationUser>()
+    .AddRoles<IdentityRole>()
+    .AddEntityFrameworkStores<BalloonMeshIdentityDbContext>();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<DataStore>();
 builder.Services.AddSingleton<FleetService>();
@@ -44,6 +55,15 @@ svelte.UseJintForCompiler()
       .UseJintForSsr();
 
 var app = builder.Build();
+
+using (var identityScope = app.Services.CreateScope())
+{
+    var identityDb = identityScope.ServiceProvider
+        .GetRequiredService<BalloonMeshIdentityDbContext>();
+    await identityDb.Database.MigrateAsync();
+    await IdentityBootstrapper.SeedAsync(identityScope.ServiceProvider,
+        app.Configuration);
+}
 
 var dataStore = app.Services.GetRequiredService<DataStore>();
 dataStore.Initialize();
@@ -109,6 +129,7 @@ app.MapGet("/login", (HttpContext context, IConfiguration configuration) =>
             "Sign in to Balloon Mesh",
             AuthSetup.OidcEnabled(configuration),
             AuthSetup.DiscordEnabled(configuration),
+            AuthSetup.LocalEnabled(configuration),
             AuthSetup.MockEnabled(configuration),
             string.IsNullOrWhiteSpace(error) ? null : error),
         SvelteRenderMode.Client,
