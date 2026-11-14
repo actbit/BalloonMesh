@@ -43,6 +43,7 @@
 #define BM_ANCHOR_TOKEN_BYTES { 'B', 'A', 'L', 'L', 'O', 'O', 'N', '1' }
 #define BM_ANCHOR_MAX 8u
 #define BM_ANCHOR_WIFI_CHANNEL 6u
+#define BM_ANCHOR_CONNECT_TIMEOUT_MS 2500u
 
 typedef struct {
     uint8_t id;

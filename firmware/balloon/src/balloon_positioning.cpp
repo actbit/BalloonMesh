@@ -107,12 +107,12 @@ static bool measure_anchor(const bm_anchor_entry_t *anchor, uint8_t batch_id,
     ESP_LOGI(TAG, "connecting to %s", anchor->ssid);
     WiFi.begin(anchor->ssid, BM_ANCHOR_WIFI_PASSWORD);
     uint32_t start = millis();
-    while (WiFi.status() != WL_CONNECTED && (uint32_t)(millis() - start) < 12000u) {
+    while (WiFi.status() != WL_CONNECTED && (uint32_t)(millis() - start) < BM_ANCHOR_CONNECT_TIMEOUT_MS) {
         delay(100);
     }
     if (WiFi.status() != WL_CONNECTED) {
         ESP_LOGW(TAG, "connect to %s failed", anchor->ssid);
-        WiFi.disconnect();
+        WiFi.disconnect(true, false);
         return false;
     }
 
@@ -213,9 +213,17 @@ static void positioning_task(void *argument) {
         }
 
         batch_id = (uint8_t)(batch_id + 1u);
-        uint32_t delay_ms = first ? 5000u : (180000u + (esp_random() % 30001u));
+        uint32_t delay_ms;
+        if (valid_count == 0) {
+            // When no anchors are reachable, back off to avoid starving BLE Mesh radio
+            delay_ms = 30000u + (esp_random() % 10001u);
+        } else if (first) {
+            delay_ms = 5000u;
+        } else {
+            delay_ms = 180000u + (esp_random() % 30001u);
+        }
         first = false;
-        ESP_LOGI(TAG, "cycle complete; next in %lu ms", (unsigned long)delay_ms);
+        ESP_LOGI(TAG, "cycle complete (valid=%u); next in %lu ms", (unsigned)valid_count, (unsigned long)delay_ms);
         vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 }
