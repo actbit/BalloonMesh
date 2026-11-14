@@ -58,7 +58,7 @@ AWS 公式には Lightsail 専用の事前定義マネージドポリシーが�
 | `--prod` | 本番実機モード（シミュレーション停止、物理Gateway待受） | - |
 | `--bundle <ID>` | プラン指定（`small_3_0`: 2GB/$12/月, `micro_3_0`: 1GB/$7/月） | `small_3_0` |
 | `--key <PATH>` | SSH 秘密鍵パス | `~/.ssh/` 下の既存鍵を自動検出 |
-| `--token <TOKEN>` | Gateway 認証トークン | `GATEWAY_TOKEN` 環境変数または未設定 |
+| `--token <TOKEN>` | 旧方式の全 Gateway 共通認証トークン | `GATEWAY_TOKEN` 環境変数または未設定 |
 | `--allow-cidr <CIDR>` | 5080ポート接続元の IP 制限（例: `219.104.138.249/32`） | 全開放 (`0.0.0.0/0`) |
 | `--name <NAME>` | Lightsail インスタンス名 | `balloonmesh-server` |
 
@@ -81,3 +81,16 @@ AWS 公式には Lightsail 専用の事前定義マネージドポリシーが�
   * `small_3_0`（2GB RAM / 2 vCPU）: **$12 / 月**（約 1,860 円 / 月）
   * `micro_3_0`（1GB RAM / 2 vCPU）: **$7 / 月**（約 1,085 円 / 月）  
   *(※ 実測メモリ消費量はアプリ＋DBで約 135MB、OS 全体で約 620MB のため、1GB プランでも安定稼働可能です)*
+
+## 5. Gateway API キーの初期設定
+
+本番では全 Gateway 共通の `GATEWAY_TOKEN` ではなく、管理画面で Gateway ごとの API キーを発行します。
+
+1. サーバーをデプロイし、Admin ロールで Web UI にログインする。
+2. **Gateway API keys** パネルへ Gateway ID（Gateway が Bluetooth MAC から生成する ID）を入力して **発行**する。
+3. 表示された `bm_live_...` をその場で保管する。平文は再表示されない。
+4. Gateway のローカルビルド環境で `BM_GATEWAY_TOKEN` に設定してビルド・書き込みする。
+5. Web UI の Gateway 一覧で接続・Provisioning 状態を確認する。
+6. ローテーション時は新しいキーを発行して再書き込みし、必要なら旧キーの失効状態を管理画面で確認する（再発行時は旧キーが自動失効）。
+
+API キーは `gateway_api_keys` にハッシュのみ保存されます。サーバー側の `Gateway:Token` は移行用の共有キーなので、個別キーへ移行した本番環境では設定しないでください。キーをまだ発行していない開発用 Gateway は、共有キーも空の場合に限り従来どおり接続できます。

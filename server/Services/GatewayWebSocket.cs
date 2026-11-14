@@ -1,6 +1,7 @@
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using BalloonMesh.Server.Data;
 using BalloonMesh.Server.Models;
 
 namespace BalloonMesh.Server.Services;
@@ -15,7 +16,8 @@ public static class GatewayWebSocket
         GatewayRegistry registry,
         MeshReportRouter router,
         ILogger logger,
-        string? expectedToken,
+        DataStore store,
+        IConfiguration configuration,
         CancellationToken cancellationToken)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(
@@ -48,7 +50,8 @@ public static class GatewayWebSocket
                                    spoolValue.TryGetInt32(out var spoolCount)
                     ? spoolCount
                     : 0;
-                if (!GatewayAuth.Matches(token, expectedToken))
+                if (string.IsNullOrWhiteSpace(gatewayId) ||
+                    !GatewayAuth.IsAuthorized(token, gatewayId, store, configuration))
                 {
                     await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation,
                         "invalid gateway token", linked.Token);

@@ -219,8 +219,22 @@ Cookie 認証を基盤に、OIDC と Discord OAuth2 を利用できます。UI�
 
 - 保護された API は未ログインで `401`、権限不足で `403`（`/api/health`、`/favicon.ico`、認証エンドポイントは公開）
 - 未ログインのページは `/login` へリダイレクト
-- Gateway の `/api/gateway/*` と `/ws/gateway` はユーザー認証ではなく `Gateway:Token` で認証
+- Gateway の `/api/gateway/*` と `/ws/gateway` はユーザー認証ではなく、Gateway ID に紐づく API キー（`X-Gateway-Token` / WebSocket hello の `token`）で認証
 - SignalR `/hubs/monitor` は Viewer 以上を要求
+
+### Gateway API キー
+
+Admin でログインすると、Web UI の **Gateway API keys** パネルから Gateway ごとの API キーを発行・失効できます。1 Gateway につき有効キーは 1 本で、再発行すると旧キーは自動的に失効します。キーの平文は発行直後に一度だけ表示され、サーバーにはハッシュだけが保存されます。
+
+認証時は、Gateway が送る `gatewayId`（HTTP の URL パラメータまたは WebSocket hello）と API キーを組み合わせて照合します。キー発行済みの Gateway A のキーを、キー発行済みの Gateway B の ID で使うことはできません。管理画面で発行したキーを、Gateway のローカルビルド時に `BM_GATEWAY_TOKEN` として設定してください。
+
+```powershell
+$env:BM_GATEWAY_TOKEN = "bm_live_..."
+cd firmware/gateway
+pio run -e gateway
+```
+
+`Gateway:Token` は既存環境からの移行用の全 Gateway 共通キーです。個別 API キーで運用する本番環境では空にしてください。キー未発行の Gateway は、既存の開発・初回登録フローを維持するため、`Gateway:Token` も空の場合に限り認証を通します。API キーを発行した Gateway は、空キーや誤ったキーを拒否します。
 
 ### OIDC
 
@@ -374,7 +388,7 @@ pio run -t upload
 - BLE Mesh 設定の NVS 永続化（アドレス・鍵・model bind・group subscription・SEQ/RPL）
 - 基準局が使えない場合の Mesh 時刻フォールバック（TIME_REQUEST/TIME_REPORT。バルーン間で交換し、サーバは透過転送のみ）
 - Gateway の NVS オフラインスプール（128 件、再接続後に再送）
-- Gateway 共有トークン認証（`Gateway:Token` / `X-Gateway-Token`）
+- Gateway ごとの API キー認証（`gateway_api_keys` / `X-Gateway-Token`）
 - UI の Gateway 状態（prov/unprov、spool 件数、transport）
 
 ### SvelteSharp Client モード
@@ -441,8 +455,9 @@ FTM_REPORT の 4B timestamp は、確定仕様で未決定のため **LED tick40
 - `anchors` — 基準局座標・時刻有効性
 - `positions` — 測位履歴（UI には測定時刻を表示しない）
 - `show_steps` — 予約コマンドの履歴
+- `gateway_api_keys` — Gateway ごとの API キー（平文ではなくハッシュを保存）
 
-接続文字列は `ConnectionStrings:BalloonMesh`、テスト用スキーマは `Data:Schema` で指定します。Gateway:Token を設定すると Gateway の WebSocket hello / HTTP ヘッダ（`X-Gateway-Token`）が一致しない接続を拒否します。
+接続文字列は `ConnectionStrings:BalloonMesh`、テスト用スキーマは `Data:Schema` で指定します。Gateway の API キーは `gateway_api_keys` にハッシュとして保存され、管理者だけが管理画面から発行・失効できます。Gateway の WebSocket hello / HTTP ヘッダ（`X-Gateway-Token`）は URL の Gateway ID に紐づけて検証されます。
 
 ---
 
@@ -458,5 +473,5 @@ FTM_REPORT の 4B timestamp は、確定仕様で未決定のため **LED tick40
 5. **LED_CANCEL の tombstone** は 64 件のリングバッファです。大量のキャンセルを長時間保持する要件がある場合は拡張が必要です。
 6. **デモシミュレーション** はサーバ内で FTM 報告を合成します。実機 Gateway がない状態でも UI と集約ロジックを確認できますが、電波・Mesh の実特性は再現しません。
 7. **UI の CDN 依存**  MapLibre GL JS と SignalR ブラウザクライアントは CDN から遅延ロードします。閉域網ではこれらのファイルを `wwwroot` 等に配置し、`Home.svelte` の URL を差し替えてください。
-8. **認証**  Gateway の共有トークン認証（`Gateway:Token`）は実装済みです。Protocol A は 8B 共有トークンのみ、WSS は CA 未設定時に証明書ピン留めなしです。本番では TLS 証明書検証 / トークンローテーション / 署名付きコマンドを追加してください。
+8. **認証**  Gateway ごとの API キー発行・失効（`gateway_api_keys` / `X-Gateway-Token`）を実装済みです。`Gateway:Token` は移行用の共有キーとして残しています。本番では TLS 証明書検証を有効にし、キー発行後は共有キーを空にしてください。Protocol A は 8B 共有トークンのみ、WSS は CA 未設定時に証明書ピン留めなしです。
 9. **Provisioner 鍵**  現在のGateway Provisionerは開発と本番の動作差を減らすため共有のプロトタイプ鍵を使用しています。本番投入前にNetKey/AppKeyを安全なNVS領域またはデバイス固有のProvisioning経路へ移し、鍵ローテーションを追加してください。

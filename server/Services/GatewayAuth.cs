@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using BalloonMesh.Server.Data;
 
 namespace BalloonMesh.Server.Services;
 
@@ -22,6 +23,43 @@ public static class GatewayAuth
             return false;
         }
         return Matches(values.ToString(), expected);
+    }
+
+    public static bool IsAuthorized(
+        HttpContext context,
+        string gatewayId,
+        DataStore store,
+        IConfiguration configuration)
+    {
+        var provided = context.Request.Headers.TryGetValue(HeaderName, out var values)
+            ? values.ToString()
+            : null;
+        return IsAuthorized(provided, gatewayId, store, configuration);
+    }
+
+    public static bool IsAuthorized(
+        string? provided,
+        string gatewayId,
+        DataStore store,
+        IConfiguration configuration)
+    {
+        var configured = ConfiguredToken(configuration);
+        if (!string.IsNullOrWhiteSpace(configured) && Matches(provided, configured))
+        {
+            return true;
+        }
+        if (store.IsGatewayApiKeyValid(gatewayId, provided))
+        {
+            return true;
+        }
+        if (store.HasActiveGatewayApiKey(gatewayId))
+        {
+            return false;
+        }
+
+        // Keep the existing development/bootstrap behavior until a gateway
+        // has an issued key or a global legacy token is configured.
+        return string.IsNullOrWhiteSpace(configured);
     }
 
     public static bool Matches(string? provided, string? expected)

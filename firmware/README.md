@@ -85,6 +85,16 @@ balloon は XIAO ESP32C3 の **D0/D1/D2 (GPIO2/3/4)** を **LEDC 5kHz / 8bit** �
   - `0` にすると HTTP ポーリングへ切り替え
 - `gateway` / `gateway-dev` 環境は起動後に BOOT ボタンを3秒長押しするとNVSを消去できる。両環境ともGateway自身が標準Provisionerとして動作し、Wi-FiでサーバーからGatewayアドレスとノード範囲を取得する。ノード範囲は最初の64アドレスを使い切ると16アドレスずつ追加されるため、開発用と本番用でProvisionerの動作差はありません。
 - Gateway IDはBluetooth MACから自動生成される。再現性が必要なテストや既存設備との互換性が必要な場合だけ `BM_GATEWAY_ID` をbuild flagで上書きする。`BM_SERVER_URL` / Wi-Fi 設定も `bm_config.h` で指定する。
+- Gateway APIキーはサーバーのAdmin画面でGateway IDごとに発行する。発行直後に表示された平文を保存し、ローカルのビルド時だけ `BM_GATEWAY_TOKEN` として渡す。キーはサーバー側ではハッシュのみ保存され、1 Gatewayにつき有効キーは1本（再発行時に旧キーは失効）である。
+
+```powershell
+$env:BM_GATEWAY_TOKEN = "bm_live_..."
+cd firmware/gateway
+pio run -e gateway
+pio run -e gateway -t upload
+```
+
+`BM_GATEWAY_TOKEN` はソースへコミットしない。サーバーの `Gateway:Token` は既存環境からの移行用の共有キーであり、GatewayごとのAPIキー運用では空にする。APIキー発行済みのGatewayは、空キーや別Gatewayのキーでは接続できない。未発行Gatewayの無認証接続は、既存の開発・初回登録フローを維持するための互換動作である。
 - WSS/HTTPS の CA は `-DBM_TLS_CA_CERT=\"...\"` で指定
 
 BOOTを押したままリセットするとESP32-C3のROM書き込みモードに入るため、NVS消去は通常起動後に実行する。
@@ -98,8 +108,8 @@ MeshアドレスはGateway自身が `0x0001-0x00FF`、バルーンなどのノ�
 - Gateway は未送信 Mesh イベントを NVS に最大 128 件保持し、WebSocket/HTTP 再接続後に再送。`ageMs` で滞留時間を通知する
 - Balloon は起動時としきい値遷移時に実際の LED キュー件数を送信（周期送信なし、失敗時は再試行）
 - Balloon の BLE 近隣探索は測位サイクル開始から 20 秒窓で実行し、FTM が 3 局以上成功した場合は結果を破棄
-- Gateway は `BM_GATEWAY_TOKEN` を hello / `X-Gateway-Token` ヘッダで送信
-- サーバ側 `Gateway:Token` と一致しない接続は拒否
+- Gateway は `BM_GATEWAY_TOKEN` を hello / `X-Gateway-Token` ヘッダで送信し、サーバーはGateway IDと組み合わせて検証
+- サーバー管理画面で発行したAPIキーは、発行直後に一度だけ表示される
 - `balloon` / `gateway` は BLE Mesh 設定を NVS に保存し、再起動後も Provisioning 状態と group subscription を復元
 - `gateway` / `gateway-dev` は `POST /api/gateway/{id}/mesh-address` でGatewayアドレスを取得し、検出したノードごとに `POST /api/gateway/{id}/mesh-node-address` でサーバー払い出しのユニキャストアドレスを使ってProvisioningする
 

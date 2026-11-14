@@ -53,7 +53,7 @@ if (string.IsNullOrWhiteSpace(GatewayAuth.ConfiguredToken(app.Configuration)) &&
     !app.Environment.IsDevelopment())
 {
     app.Logger.LogWarning(
-        "Gateway:Token is not configured; /ws/gateway and /api/gateway/* accept unauthenticated clients.");
+        "Gateway:Token is not configured; gateway authentication uses per-Gateway API keys when issued, otherwise development/bootstrap clients are accepted.");
 }
 
 app.UseWebSockets(new WebSocketOptions
@@ -82,7 +82,8 @@ app.Map("/ws/gateway", async context =>
     var logger = context.RequestServices.GetRequiredService<ILoggerFactory>()
         .CreateLogger("GatewayWebSocket");
     await GatewayWebSocket.HandleAsync(socket, context, registry, router, logger,
-        GatewayAuth.ConfiguredToken(context.RequestServices.GetRequiredService<IConfiguration>()),
+        dataStore,
+        context.RequestServices.GetRequiredService<IConfiguration>(),
         context.RequestAborted);
 });
 
@@ -225,11 +226,34 @@ app.MapGet("/api/gateway-mesh-allocations", (DataStore store) =>
     Results.Ok(store.GetGatewayMeshAllocations()))
     .RequireAuthorization(AuthRoles.Viewer);
 
+app.MapGet("/api/admin/gateway-api-keys", (DataStore store) =>
+    Results.Ok(store.GetGatewayApiKeys()))
+    .RequireAuthorization(AuthRoles.Admin);
+
+app.MapPost("/api/admin/gateway-api-keys",
+    (GatewayApiKeyIssueRequest request, DataStore store) =>
+    {
+        try
+        {
+            return Results.Ok(store.IssueGatewayApiKey(request.GatewayId));
+        }
+        catch (ArgumentException exception)
+        {
+            return Results.BadRequest(new { error = exception.Message });
+        }
+    })
+    .RequireAuthorization(AuthRoles.Admin);
+
+app.MapPost("/api/admin/gateway-api-keys/{id:long}/revoke",
+    (long id, DataStore store) =>
+        store.RevokeGatewayApiKey(id) ? Results.Ok() : Results.NotFound())
+    .RequireAuthorization(AuthRoles.Admin);
+
 app.MapPost("/api/gateway/{id}/mesh-address",
     (HttpContext http, string id, GatewayMeshAddressRequest request,
         DataStore store, IConfiguration configuration) =>
     {
-        if (!GatewayAuth.IsAuthorized(http, configuration))
+        if (!GatewayAuth.IsAuthorized(http, id, store, configuration))
         {
             return Results.Unauthorized();
         }
@@ -260,7 +284,7 @@ app.MapPost("/api/gateway/{id}/mesh-node-address",
     (HttpContext http, string id, GatewayMeshNodeAddressRequest request,
         DataStore store, IConfiguration configuration) =>
     {
-        if (!GatewayAuth.IsAuthorized(http, configuration))
+        if (!GatewayAuth.IsAuthorized(http, id, store, configuration))
         {
             return Results.Unauthorized();
         }
@@ -391,9 +415,9 @@ app.MapPost("/api/demo/stop", async (SimulationService simulation, CancellationT
 
 app.MapPost("/api/gateway/{id}/events",
     (HttpContext http, string id, GatewayEventsRequest request, GatewayRegistry registry,
-        MeshReportRouter router, IConfiguration configuration) =>
+        MeshReportRouter router, DataStore store, IConfiguration configuration) =>
     {
-        if (!GatewayAuth.IsAuthorized(http, configuration))
+        if (!GatewayAuth.IsAuthorized(http, id, store, configuration))
         {
             return Results.Unauthorized();
         }
@@ -413,9 +437,9 @@ app.MapPost("/api/gateway/{id}/events",
 
 app.MapGet("/api/gateway/{id}/commands",
     async (HttpContext http, string id, int? waitMs, GatewayRegistry registry,
-        IConfiguration configuration, CancellationToken cancellationToken) =>
+        DataStore store, IConfiguration configuration, CancellationToken cancellationToken) =>
     {
-        if (!GatewayAuth.IsAuthorized(http, configuration))
+        if (!GatewayAuth.IsAuthorized(http, id, store, configuration))
         {
             return Results.Unauthorized();
         }

@@ -1,4 +1,5 @@
 using Npgsql;
+using System.Security.Cryptography;
 
 namespace BalloonMesh.Server.Data;
 
@@ -82,6 +83,21 @@ public sealed record GatewayMeshAllocationRecord(
     string GatewayId,
     ushort MeshAddress,
     IReadOnlyList<GatewayMeshAllocationRangeRecord> Ranges);
+
+public sealed record GatewayApiKeyRecord(
+    long Id,
+    string GatewayId,
+    string TokenPrefix,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset? RevokedAt,
+    bool Active);
+
+public sealed record GatewayApiKeyIssuedRecord(
+    long Id,
+    string GatewayId,
+    string Token,
+    string TokenPrefix,
+    DateTimeOffset CreatedAt);
 
 /// <summary>
 /// PostgreSQL persistence.  The live state is small (about 50 balloons), so
@@ -228,6 +244,15 @@ public sealed class DataStore
                 mesh_address INTEGER NOT NULL UNIQUE,
                 range_start INTEGER NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL);
+            CREATE TABLE IF NOT EXISTS gateway_api_keys(
+                id BIGSERIAL PRIMARY KEY,
+                gateway_id TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                token_prefix TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                revoked_at TIMESTAMPTZ NULL);
+            CREATE INDEX IF NOT EXISTS ix_gateway_api_keys_active
+                ON gateway_api_keys(gateway_id, revoked_at);
             """;
         command.ExecuteNonQuery();
         Seed(connection);
@@ -258,7 +283,7 @@ public sealed class DataStore
             command.CommandText = """
                 TRUNCATE TABLE positions, show_steps, gateway_mesh_node_addresses,
                     gateway_mesh_address_ranges, gateway_mesh_addresses,
-                    balloons, anchors, balloon_groups
+                    gateway_api_keys, balloons, anchors, balloon_groups
                 RESTART IDENTITY CASCADE;
                 """;
             command.ExecuteNonQuery();
@@ -581,7 +606,162 @@ public sealed class DataStore
             .ToArray();
     }
 
+    public GatewayApiKeyIssuedRecord IssueGatewayApiKey(string gatewayId)
+    {
+        if (string.IsNullOrWhiteSpace(gatewayId) || gatewayId.Length > 64)
+        {
+            throw new ArgumentException("Gateway ID is required.", nameof(gatewayId));
+        }
+
+        gatewayId = gatewayId.Trim();
+        var token = GenerateGatewayApiToken();
+        var tokenHash = HashGatewayApiToken(token);
+        var tokenPrefix = token[..Math.Min(16, token.Length)];
+        var createdAt = DateTimeOffset.UtcNow;
+
+        lock (_writeGate)
+        {
+            using var connection = Open();
+            using var transaction = connection.BeginTransaction();
+            using (var tableLock = connection.CreateCommand())
+            {
+                tableLock.Transaction = transaction;
+                tableLock.CommandText = "LOCK TABLE gateway_api_keys IN EXCLUSIVE MODE";
+                tableLock.ExecuteNonQuery();
+            }
+
+            using (var revoke = connection.CreateCommand())
+            {
+                revoke.Transaction = transaction;
+                revoke.CommandText = """
+                    UPDATE gateway_api_keys
+                    SET revoked_at = @revoked_at
+                    WHERE gateway_id = @gateway_id AND revoked_at IS NULL;
+                    """;
+                revoke.Parameters.AddWithValue("revoked_at", createdAt);
+                revoke.Parameters.AddWithValue("gateway_id", gatewayId);
+                revoke.ExecuteNonQuery();
+            }
+
+            long id;
+            using (var insert = connection.CreateCommand())
+            {
+                insert.Transaction = transaction;
+                insert.CommandText = """
+                    INSERT INTO gateway_api_keys(
+                        gateway_id, token_hash, token_prefix, created_at)
+                    VALUES(@gateway_id, @token_hash, @token_prefix, @created_at)
+                    RETURNING id;
+                    """;
+                insert.Parameters.AddWithValue("gateway_id", gatewayId);
+                insert.Parameters.AddWithValue("token_hash", tokenHash);
+                insert.Parameters.AddWithValue("token_prefix", tokenPrefix);
+                insert.Parameters.AddWithValue("created_at", createdAt);
+                id = (long)insert.ExecuteScalar()!;
+            }
+
+            transaction.Commit();
+            return new GatewayApiKeyIssuedRecord(
+                id, gatewayId, token, tokenPrefix, createdAt);
+        }
+    }
+
+    public IReadOnlyList<GatewayApiKeyRecord> GetGatewayApiKeys()
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, gateway_id, token_prefix, created_at, revoked_at
+            FROM gateway_api_keys
+            ORDER BY gateway_id, created_at DESC;
+            """;
+
+        var keys = new List<GatewayApiKeyRecord>();
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            DateTimeOffset? revokedAt = reader.IsDBNull(4)
+                ? null
+                : reader.GetFieldValue<DateTimeOffset>(4);
+            keys.Add(new GatewayApiKeyRecord(
+                reader.GetInt64(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetFieldValue<DateTimeOffset>(3),
+                revokedAt,
+                revokedAt is null));
+        }
+        return keys;
+    }
+
+    public bool RevokeGatewayApiKey(long id)
+    {
+        lock (_writeGate)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                UPDATE gateway_api_keys
+                SET revoked_at = @revoked_at
+                WHERE id = @id AND revoked_at IS NULL;
+                """;
+            command.Parameters.AddWithValue("revoked_at", DateTimeOffset.UtcNow);
+            command.Parameters.AddWithValue("id", id);
+            return command.ExecuteNonQuery() > 0;
+        }
+    }
+
+    public bool HasActiveGatewayApiKey(string gatewayId)
+    {
+        if (string.IsNullOrWhiteSpace(gatewayId))
+        {
+            return false;
+        }
+
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT EXISTS(
+                SELECT 1 FROM gateway_api_keys
+                WHERE gateway_id = @gateway_id AND revoked_at IS NULL);
+            """;
+        command.Parameters.AddWithValue("gateway_id", gatewayId.Trim());
+        return (bool)command.ExecuteScalar()!;
+    }
+
+    public bool IsGatewayApiKeyValid(string gatewayId, string? token)
+    {
+        if (string.IsNullOrWhiteSpace(gatewayId) || string.IsNullOrWhiteSpace(token))
+        {
+            return false;
+        }
+
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT EXISTS(
+                SELECT 1 FROM gateway_api_keys
+                WHERE gateway_id = @gateway_id
+                  AND token_hash = @token_hash
+                  AND revoked_at IS NULL);
+            """;
+        command.Parameters.AddWithValue("gateway_id", gatewayId.Trim());
+        command.Parameters.AddWithValue("token_hash", HashGatewayApiToken(token));
+        return (bool)command.ExecuteScalar()!;
+    }
+
     private sealed record MeshAddressRange(long Id, int Start, int End, int NextAddress);
+
+    private static string GenerateGatewayApiToken()
+    {
+        var bytes = RandomNumberGenerator.GetBytes(32);
+        return $"bm_live_{Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')}";
+    }
+
+    private static string HashGatewayApiToken(string token)
+    {
+        return Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(token)));
+    }
 
     private static MeshAddressRange ReadRange(
         NpgsqlConnection connection, NpgsqlTransaction transaction, int rangeStart)

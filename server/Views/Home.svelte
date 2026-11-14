@@ -50,6 +50,14 @@
     meshAddress: number;
     ranges: GatewayMeshRange[];
   };
+  type GatewayApiKey = {
+    id: number;
+    gatewayId: string;
+    tokenPrefix: string;
+    createdAt: string;
+    revokedAt: string | null;
+    active: boolean;
+  };
   type Group = { id: number; name: string; meshGroupAddress: number; balloonCount: number };
   type HistorySample = { lat: number; lon: number; confidence: number; method: string };
   type MockDevice = {
@@ -78,6 +86,10 @@
   let anchors = $state<Anchor[]>([]);
   let gateways = $state<Gateway[]>([]);
   let meshAllocations = $state<GatewayMeshAllocation[]>([]);
+  let gatewayApiKeys = $state<GatewayApiKey[]>([]);
+  let apiKeyGatewayId = $state('');
+  let issuedGatewayApiKey = $state('');
+  let apiKeyError = $state('');
   let groups = $state<Group[]>([]);
   let simulationRunning = $state(false);
   let selectedAddress = $state<number | null>(null);
@@ -471,6 +483,53 @@
     }
   }
 
+  async function fetchGatewayApiKeys() {
+    if (!model.canAdmin) return;
+    try {
+      gatewayApiKeys = await api('/api/admin/gateway-api-keys') as GatewayApiKey[];
+    } catch {
+      // API key management is only available to administrators.
+    }
+  }
+
+  async function issueGatewayApiKey() {
+    if (!model.canAdmin) return;
+    const gatewayId = apiKeyGatewayId.trim();
+    if (!gatewayId) {
+      apiKeyError = 'Gateway ID is required.';
+      return;
+    }
+    try {
+      const result = await api('/api/admin/gateway-api-keys', {
+        method: 'POST',
+        body: JSON.stringify({ gatewayId })
+      }) as { gatewayId: string; token: string };
+      issuedGatewayApiKey = result.token;
+      apiKeyError = '';
+      await fetchGatewayApiKeys();
+      addLog(`Issued a new API key for ${result.gatewayId}.`);
+    } catch (error) {
+      apiKeyError = (error as Error).message;
+    }
+  }
+
+  async function revokeGatewayApiKey(id: number) {
+    if (!model.canAdmin) return;
+    try {
+      await api(`/api/admin/gateway-api-keys/${id}/revoke`, { method: 'POST' });
+      await fetchGatewayApiKeys();
+      addLog('Gateway API key revoked.');
+    } catch (error) {
+      apiKeyError = (error as Error).message;
+    }
+  }
+
+  async function copyIssuedGatewayApiKey() {
+    if (!issuedGatewayApiKey || !navigator.clipboard) return;
+    await navigator.clipboard.writeText(issuedGatewayApiKey);
+    addLog('Gateway API key copied to clipboard.');
+  }
+
   async function fetchState() {
     try {
       const state = await api('/api/state');
@@ -478,6 +537,7 @@
       void fetchShow();
       void fetchOnboarding();
       void fetchGatewayMeshAllocations();
+      void fetchGatewayApiKeys();
     } catch (error) {
       addLog(`State refresh failed: ${(error as Error).message}`);
     }
@@ -958,6 +1018,49 @@
         </ul>
       {/if}
     </section>
+
+    {#if model.canAdmin}
+      <section class="panel gateway-key-panel">
+        <div class="panel-title">
+          <h2>Gateway APIキー</h2>
+          <span class="pill">admin</span>
+        </div>
+        <p class="hint">Gatewayごとに有効キーは1本です。発行したキーは一度だけ表示されます。</p>
+        <div class="new-group gateway-key-create">
+          <input bind:value={apiKeyGatewayId} placeholder="Gateway ID" aria-label="Gateway ID" />
+          <button class="primary" onclick={issueGatewayApiKey}>発行</button>
+        </div>
+        {#if apiKeyError}
+          <p class="error-row gateway-key-error">{apiKeyError}</p>
+        {/if}
+        {#if issuedGatewayApiKey}
+          <div class="gateway-key-issued">
+            <strong>このキーを今すぐ保存してください</strong>
+            <code>{issuedGatewayApiKey}</code>
+            <button class="mini" onclick={copyIssuedGatewayApiKey}>コピー</button>
+          </div>
+        {/if}
+        {#if gatewayApiKeys.length === 0}
+          <p class="hint">発行済みのキーはありません。</p>
+        {:else}
+          <ul class="gateway-key-list">
+            {#each gatewayApiKeys as key}
+              <li>
+                <span class="gateway-key-main">
+                  <strong>{key.gatewayId}</strong>
+                  <small>{key.tokenPrefix}… · {formatDateTime(key.createdAt)}</small>
+                </span>
+                {#if key.active}
+                  <button class="mini" onclick={() => revokeGatewayApiKey(key.id)}>失効</button>
+                {:else}
+                  <span class="show-status canceled">失効済み</span>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+    {/if}
   </aside>
 
   {#if mapError}
@@ -1232,6 +1335,22 @@
   .gateway-range-list li { display: flex; justify-content: space-between; gap: 8px; padding: 0; background: transparent; color: #cbd5e1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
   .gateway-range-list small { color: #94a3b8; font-family: "Inter", "Segoe UI", system-ui, sans-serif; font-size: 9px; }
   .gateway-mesh-empty { margin: 7px 0 0 16px; color: #64748b; font-size: 10px; }
+  .gateway-key-create { margin-top: 10px; }
+  .gateway-key-create input { min-width: 0; }
+  .gateway-key-error { padding-left: 0; }
+  .gateway-key-issued {
+    display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding: 9px;
+    border: 1px solid rgba(251, 191, 36, 0.45); border-radius: 10px;
+    background: rgba(120, 53, 15, 0.2); color: #fde68a; font-size: 10px;
+  }
+  .gateway-key-issued code {
+    overflow-wrap: anywhere; color: #fef3c7; font-size: 10px; user-select: all;
+  }
+  .gateway-key-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .gateway-key-list li { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+  .gateway-key-main { display: flex; flex-direction: column; min-width: 0; }
+  .gateway-key-main strong { font-size: 10px; }
+  .gateway-key-main small { color: #94a3b8; font-size: 9px; overflow-wrap: anywhere; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: #64748b; }
   .dot.good { background: #34d399; }
   .dot.bad { background: #f87171; }
