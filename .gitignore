@@ -30,7 +30,6 @@ third_party/SvelteSharp/**/obj/
 TestResults/
 *.log
 .worktrees/
-scripts/watch_*.py
 
 # Secrets & Environment files
 .env

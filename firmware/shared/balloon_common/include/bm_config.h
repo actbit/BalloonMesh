@@ -129,6 +129,12 @@ static const bm_anchor_entry_t BM_ANCHORS[] = {
 #include "bm_server_ca.h"
 #endif
 #endif
+/* Default: the server certificate is issued by Let's Encrypt, so trust its
+ * roots (ISRG Root X1 RSA + X2 ECDSA).  The host name is still verified. */
+#ifndef BM_TLS_CA_CERT
+#include "bm_letsencrypt_roots.h"
+#define BM_TLS_CA_CERT BM_LETSENCRYPT_ROOTS_PEM
+#endif
 /* Plain HTTP/WS or unverified TLS is only allowed in explicit development
  * builds.  Everything else must verify the server certificate chain and host
  * name, because the gateway API key and Mesh network keys cross this link. */
