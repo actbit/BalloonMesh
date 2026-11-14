@@ -50,6 +50,14 @@ public sealed class GatewayClient
     /// </summary>
     public bool Restored { get; set; }
 
+    /// <summary>
+    /// Serializes this gateway's write-through so two snapshots cannot reach
+    /// the database out of order.  Lock order is PersistGate then
+    /// ConnectionGate; never call into persistence while holding
+    /// ConnectionGate.
+    /// </summary>
+    public object PersistGate { get; } = new();
+
     /// <summary>Last write-through of this gateway's row, for throttling.</summary>
     public DateTimeOffset PersistedAt { get; set; }
     public string? PersistedState { get; set; }
@@ -129,43 +137,54 @@ public sealed class GatewayRegistry
     /// change is throttled so a long-polling gateway does not write per
     /// request.
     /// </summary>
+    /// <remarks>
+    /// Must be called without holding <c>ConnectionGate</c>: it takes
+    /// PersistGate first, and holds it across the database call so two
+    /// concurrent callers cannot write their snapshots out of order and leave
+    /// the row holding the older one.  ConnectionGate is held only long enough
+    /// to copy the fields, so a slow write never blocks a connection change.
+    /// </remarks>
     private void Persist(GatewayClient client)
     {
-        string? remote;
-        string? firmware;
-        bool provisioned;
-        int spoolPending;
-        DateTimeOffset lastSeen;
-        lock (client.ConnectionGate)
+        lock (client.PersistGate)
         {
-            var signature = StateSignature(client);
-            var now = DateTimeOffset.UtcNow;
-            if (signature == client.PersistedState &&
-                now - client.PersistedAt < PersistInterval)
-            {
-                return;
-            }
-            client.PersistedState = signature;
-            client.PersistedAt = now;
-            remote = client.Remote;
-            firmware = client.Firmware;
-            provisioned = client.Provisioned;
-            spoolPending = client.SpoolPending;
-            lastSeen = client.LastSeen;
-        }
-        try
-        {
-            _store.UpsertGateway(client.Id, remote, firmware, provisioned,
-                spoolPending, lastSeen);
-        }
-        catch (Exception exception)
-        {
-            // Persistence must not fail a gateway request; the next write retries.
-            _logger.LogWarning(exception,
-                "Could not persist gateway {Gateway}", client.Id);
+            string? remote;
+            string? firmware;
+            bool provisioned;
+            int spoolPending;
+            DateTimeOffset lastSeen;
             lock (client.ConnectionGate)
             {
-                client.PersistedState = null;
+                var signature = StateSignature(client);
+                var now = DateTimeOffset.UtcNow;
+                if (signature == client.PersistedState &&
+                    now - client.PersistedAt < PersistInterval)
+                {
+                    return;
+                }
+                client.PersistedState = signature;
+                client.PersistedAt = now;
+                remote = client.Remote;
+                firmware = client.Firmware;
+                provisioned = client.Provisioned;
+                spoolPending = client.SpoolPending;
+                lastSeen = client.LastSeen;
+            }
+            try
+            {
+                _store.UpsertGateway(client.Id, remote, firmware, provisioned,
+                    spoolPending, lastSeen);
+            }
+            catch (Exception exception)
+            {
+                // Persistence must not fail a gateway request; the next write
+                // retries because the signature is cleared.
+                _logger.LogWarning(exception,
+                    "Could not persist gateway {Gateway}", client.Id);
+                lock (client.ConnectionGate)
+                {
+                    client.PersistedState = null;
+                }
             }
         }
     }
@@ -197,9 +216,8 @@ public sealed class GatewayRegistry
             client.Remote = remote;
             client.Restored = false;
         }
-        Persist(client);
-        // Stop the previous receive loop; the single writer survives and will
-        // pick up the new CurrentSocket.
+        // Stop the previous receive loop before persisting: takeover of the
+        // new connection must not wait on a database write.
         if (previous is not null)
         {
             try
@@ -211,6 +229,7 @@ public sealed class GatewayRegistry
                 // The previous handler already finished.
             }
         }
+        Persist(client);
         _ = NotifyChangedAsync();
         return generation;
     }

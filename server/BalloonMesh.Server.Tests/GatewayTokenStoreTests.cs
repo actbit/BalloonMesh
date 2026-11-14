@@ -1,4 +1,5 @@
 using BalloonMesh.Server.Services;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BalloonMesh.Server.Tests;
@@ -104,6 +105,142 @@ public sealed class GatewayTokenStoreTests
         Assert.NotEqual(first.PlainToken, second.PlainToken);
         Assert.True(store.Authenticate(first.PlainToken, "gw-01").Authorized);
         Assert.True(store.Authenticate(second.PlainToken, "gw-01").Authorized);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("\t")]
+    [InlineData("\n")]
+    public void ABlankGatewayIdIsRejectedRatherThanSkippingTheBindingCheck(string? id)
+    {
+        var (store, _, _) = Create();
+        var issued = store.Issue("gw-01", "stage left", "admin", null);
+
+        // "/api/gateway/%20/events" reaches the handler with a blank id, so a
+        // blank id must deny instead of waving the binding check through.
+        var result = store.Authenticate(issued.PlainToken, id);
+
+        Assert.False(result.Authorized);
+        Assert.Equal(GatewayTokenFailure.GatewayMismatch, result.Failure);
+    }
+
+    [Theory]
+    [InlineData("gw-01")]
+    [InlineData("GW_01.a")]
+    public void AValidGatewayIdIsAccepted(string id)
+    {
+        Assert.True(GatewayTokenStore.IsValidGatewayId(id));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("gw 01")]
+    [InlineData("gw\n2026-11-14 admin login ok")]
+    [InlineData("gw/../etc")]
+    [InlineData("gw;01")]
+    public void AnIdThatCouldForgeALogLineIsNotValid(string id)
+    {
+        Assert.False(GatewayTokenStore.IsValidGatewayId(id));
+        Assert.Equal("<invalid-id>", GatewayTokenStore.ForLog(id));
+    }
+
+    [Fact]
+    public void AnOverlongGatewayIdIsNotValid()
+    {
+        Assert.False(GatewayTokenStore.IsValidGatewayId(
+            new string('a', GatewayTokenStore.MaxGatewayIdLength + 1)));
+        Assert.True(GatewayTokenStore.IsValidGatewayId(
+            new string('a', GatewayTokenStore.MaxGatewayIdLength)));
+    }
+
+    [Fact]
+    public void ARevokeDuringALookupDoesNotLeaveTheTokenCachedAsValid()
+    {
+        var repository = new FakeGatewayTokenRepository();
+        var time = new TestTimeProvider(Now);
+        var store = new GatewayTokenStore(repository, time,
+            NullLogger<GatewayTokenStore>.Instance);
+        var issued = store.Issue("gw-01", "stage left", "admin", null);
+
+        // Revoke lands between the lookup's database read and its cache write,
+        // which is the interleaving a polling gateway makes likely.
+        repository.OnNextLookup = () => store.Revoke(issued.Record.Id);
+        store.Authenticate(issued.PlainToken, "gw-01");
+
+        // The next request must not be served the pre-revocation row.
+        var result = store.Authenticate(issued.PlainToken, "gw-01");
+        Assert.False(result.Authorized);
+        Assert.Equal(GatewayTokenFailure.Revoked, result.Failure);
+    }
+
+    [Fact]
+    public void UnknownTokensCannotGrowTheCacheWithoutBound()
+    {
+        var (store, repository, _) = Create();
+
+        for (var i = 0; i < 5_000; i++)
+        {
+            var result = store.Authenticate($"bmgw_bogus-{i}", "gw-01");
+            Assert.False(result.Authorized);
+        }
+
+        Assert.True(store.CachedLookups <= 512,
+            $"cache grew to {store.CachedLookups} entries");
+        // A genuine token still authenticates after the flood.
+        var issued = store.Issue("gw-01", "stage left", "admin", null);
+        Assert.True(store.Authenticate(issued.PlainToken, "gw-01").Authorized);
+        Assert.True(repository.Lookups > 0);
+    }
+
+    [Fact]
+    public void TheHttpEntryPointRejectsARequestWithNoHeader()
+    {
+        var (store, _, _) = Create();
+        store.Issue("gw-01", "stage left", "admin", null);
+
+        Assert.False(store.AuthenticateRequest(new DefaultHttpContext(), "gw-01")
+            .Authorized);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void TheHttpEntryPointRejectsABlankHeader(string header)
+    {
+        var (store, _, _) = Create();
+        store.Issue("gw-01", "stage left", "admin", null);
+        var context = new DefaultHttpContext();
+        context.Request.Headers[GatewayTokenStore.HeaderName] = header;
+
+        Assert.False(store.AuthenticateRequest(context, "gw-01").Authorized);
+    }
+
+    [Fact]
+    public void TheHttpEntryPointAcceptsTheIssuedTokenAndRejectsAnotherGatewayId()
+    {
+        var (store, _, _) = Create();
+        var issued = store.Issue("gw-01", "stage left", "admin", null);
+        var context = new DefaultHttpContext();
+        context.Request.Headers[GatewayTokenStore.HeaderName] = issued.PlainToken;
+
+        Assert.True(store.AuthenticateRequest(context, "gw-01").Authorized);
+        Assert.False(store.AuthenticateRequest(context, "gw-02").Authorized);
+        Assert.False(store.AuthenticateRequest(context, " ").Authorized);
+    }
+
+    [Fact]
+    public void TwoTokenHeadersDoNotAuthenticate()
+    {
+        var (store, _, _) = Create();
+        var issued = store.Issue("gw-01", "stage left", "admin", null);
+        var context = new DefaultHttpContext();
+        context.Request.Headers[GatewayTokenStore.HeaderName] =
+            new[] { issued.PlainToken, issued.PlainToken };
+
+        Assert.False(store.AuthenticateRequest(context, "gw-01").Authorized);
     }
 
     [Fact]

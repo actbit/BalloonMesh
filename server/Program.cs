@@ -359,16 +359,21 @@ app.MapGet("/api/gateway-tokens", (GatewayTokenStore tokens) =>
     .RequireAuthorization(AuthRoles.Admin);
 
 app.MapPost("/api/gateway-tokens",
-    (HttpContext http, GatewayTokenRequest request, GatewayTokenStore tokens) =>
+    (HttpContext http, GatewayTokenRequest request, GatewayTokenStore tokens,
+        TimeProvider time) =>
     {
         var gatewayId = request.GatewayId?.Trim();
         if (string.IsNullOrWhiteSpace(gatewayId))
         {
             return Results.BadRequest(new { error = "gatewayId is required." });
         }
-        if (gatewayId.Length > 64)
+        if (!GatewayTokenStore.IsValidGatewayId(gatewayId))
         {
-            return Results.BadRequest(new { error = "gatewayId is too long." });
+            return Results.BadRequest(new
+            {
+                error = "gatewayId may use letters, digits, '-', '_' and '.' only, " +
+                    $"up to {GatewayTokenStore.MaxGatewayIdLength} characters."
+            });
         }
         var label = string.IsNullOrWhiteSpace(request.Label)
             ? gatewayId
@@ -385,7 +390,7 @@ app.MapPost("/api/gateway-tokens",
                 return Results.BadRequest(
                     new { error = "expiresInDays must be between 1 and 3650." });
             }
-            expiresAt = DateTimeOffset.UtcNow.AddDays(days);
+            expiresAt = time.GetUtcNow().AddDays(days);
         }
         var issuer = AuthenticatedUser.From(http.User).Name;
         var issued = tokens.Issue(gatewayId, label, issuer, expiresAt);

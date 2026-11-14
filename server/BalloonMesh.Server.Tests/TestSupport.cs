@@ -100,27 +100,49 @@ public static class TestRegistry
 public sealed class FakeGatewayStateStore : IGatewayStateStore
 {
     private readonly Dictionary<string, GatewayRecord> _rows = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _gate = new();
+    private int _writes;
 
-    public int Writes { get; private set; }
+    public int Writes
+    {
+        get { lock (_gate) { return _writes; } }
+    }
 
-    public IReadOnlyList<GatewayRecord> GetGateways() => _rows.Values.ToArray();
+    public IReadOnlyList<GatewayRecord> GetGateways()
+    {
+        lock (_gate)
+        {
+            return _rows.Values.ToArray();
+        }
+    }
 
     public void UpsertGateway(string id, string? remote, string? firmware,
         bool? provisioned, int? spoolPending, DateTimeOffset lastSeen)
     {
-        Writes++;
-        _rows.TryGetValue(id, out var existing);
-        _rows[id] = new GatewayRecord(
-            id,
-            remote ?? existing?.Remote,
-            firmware ?? existing?.Firmware,
-            provisioned ?? existing?.Provisioned ?? false,
-            spoolPending ?? existing?.SpoolPending ?? 0,
-            existing?.FirstSeen ?? lastSeen,
-            existing is null || lastSeen > existing.LastSeen ? lastSeen : existing.LastSeen);
+        lock (_gate)
+        {
+            _writes++;
+            _rows.TryGetValue(id, out var existing);
+            _rows[id] = new GatewayRecord(
+                id,
+                remote ?? existing?.Remote,
+                firmware ?? existing?.Firmware,
+                provisioned ?? existing?.Provisioned ?? false,
+                spoolPending ?? existing?.SpoolPending ?? 0,
+                existing?.FirstSeen ?? lastSeen,
+                existing is null || lastSeen > existing.LastSeen
+                    ? lastSeen
+                    : existing.LastSeen);
+        }
     }
 
-    public void Seed(GatewayRecord record) => _rows[record.Id] = record;
+    public void Seed(GatewayRecord record)
+    {
+        lock (_gate)
+        {
+            _rows[record.Id] = record;
+        }
+    }
 }
 
 /// <summary>In-memory stand-in for the gateway_tokens table.</summary>
@@ -132,6 +154,12 @@ public sealed class FakeGatewayTokenRepository : IGatewayTokenRepository
 
     public int Lookups { get; private set; }
     public int UseWrites { get; private set; }
+
+    /// <summary>
+    /// Runs once, inside the next lookup and after its row is read, so a test
+    /// can interleave a revoke with a lookup that is already in flight.
+    /// </summary>
+    public Action? OnNextLookup { get; set; }
 
     public long InsertGatewayToken(string gatewayId, string label, byte[] tokenHash,
         string prefix, string createdBy, DateTimeOffset createdAt,
@@ -150,9 +178,16 @@ public sealed class FakeGatewayTokenRepository : IGatewayTokenRepository
     public GatewayTokenRecord? FindGatewayTokenByHash(byte[] tokenHash)
     {
         Lookups++;
-        return _byHash.TryGetValue(Convert.ToHexString(tokenHash), out var id)
+        var row = _byHash.TryGetValue(Convert.ToHexString(tokenHash), out var id)
             ? _rows[id]
             : null;
+        var hook = OnNextLookup;
+        if (hook is not null)
+        {
+            OnNextLookup = null;
+            hook();
+        }
+        return row;
     }
 
     public bool RevokeGatewayToken(long id, DateTimeOffset revokedAt)

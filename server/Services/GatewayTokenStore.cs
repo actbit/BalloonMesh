@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
 using System.Text;
 using BalloonMesh.Server.Data;
@@ -54,11 +55,26 @@ public sealed class GatewayTokenStore
     /// <summary>How often a token's last_used_at is written back.</summary>
     private static readonly TimeSpan UseWriteInterval = TimeSpan.FromSeconds(60);
 
+    /// <summary>
+    /// Upper bound on cached lookups.  Unknown digests are cached too, and an
+    /// unauthenticated caller chooses them, so the cache must not grow with
+    /// request count.
+    /// </summary>
+    private const int MaxCacheEntries = 512;
+
     private readonly IGatewayTokenRepository _store;
     private readonly TimeProvider _time;
     private readonly ILogger<GatewayTokenStore> _logger;
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<long, DateTimeOffset> _lastUseWrite = new();
+
+    /// <summary>
+    /// Bumped by every issue and revoke.  A lookup captures it before reading
+    /// the database and the result is only cached if it has not changed since,
+    /// so a revoke that lands mid-lookup cannot be overwritten by the stale
+    /// row the lookup already fetched.
+    /// </summary>
+    private long _generation;
 
     public GatewayTokenStore(IGatewayTokenRepository store, TimeProvider time,
         ILogger<GatewayTokenStore> logger)
@@ -69,6 +85,9 @@ public sealed class GatewayTokenStore
     }
 
     public IReadOnlyList<GatewayTokenRecord> List() => _store.GetGatewayTokens();
+
+    /// <summary>Cached lookups held right now; exposed so a test can show the cache is bounded.</summary>
+    public int CachedLookups => _cache.Count;
 
     /// <summary>
     /// Creates a token for one gateway id.  The plain value is only in the
@@ -81,7 +100,7 @@ public sealed class GatewayTokenStore
         var now = _time.GetUtcNow();
         var id = _store.InsertGatewayToken(gatewayId, label, Digest(plain),
             Prefix(plain), createdBy, now, expiresAt);
-        _cache.Clear();
+        Invalidate();
         _logger.LogInformation(
             "Issued gateway token {Prefix} for {Gateway} by {User}",
             Prefix(plain), gatewayId, createdBy);
@@ -94,9 +113,9 @@ public sealed class GatewayTokenStore
     public bool Revoke(long id)
     {
         var revoked = _store.RevokeGatewayToken(id, _time.GetUtcNow());
-        // Clear even when the row was already revoked, so a cached entry from
-        // a concurrent request cannot keep the token alive.
-        _cache.Clear();
+        // Invalidate even when the row was already revoked, so a cached entry
+        // from a concurrent request cannot keep the token alive.
+        Invalidate();
         if (revoked)
         {
             _logger.LogInformation("Revoked gateway token {Id}", id);
@@ -118,7 +137,9 @@ public sealed class GatewayTokenStore
         {
             _logger.LogWarning(
                 "Rejected gateway request for {Gateway} from {Remote}: {Reason}",
-                gatewayId, context.Connection.RemoteIpAddress, result.Failure);
+                // The id comes from the URL, so an invalid one must not reach
+                // the log as text: it could otherwise forge whole log lines.
+                ForLog(gatewayId), context.Connection.RemoteIpAddress, result.Failure);
         }
         return result;
     }
@@ -128,6 +149,14 @@ public sealed class GatewayTokenStore
         if (string.IsNullOrWhiteSpace(presented))
         {
             return GatewayTokenResult.NoToken;
+        }
+        // A token is only ever valid for the gateway it was issued for, so a
+        // caller that names no gateway cannot be authenticated.  The route
+        // pattern accepts a blank segment ("/api/gateway/%20/events"), so
+        // this check must deny rather than skip the binding below.
+        if (!IsValidGatewayId(gatewayId))
+        {
+            return GatewayTokenResult.Denied(GatewayTokenFailure.GatewayMismatch);
         }
 
         var now = _time.GetUtcNow();
@@ -139,8 +168,16 @@ public sealed class GatewayTokenStore
         }
         else
         {
+            var generation = Interlocked.Read(ref _generation);
             record = _store.FindGatewayTokenByHash(Convert.FromHexString(digest));
-            _cache[digest] = new CacheEntry(record, now + CacheLifetime);
+            // Drop the result instead of caching it if an issue or revoke
+            // landed while the read was in flight: the row may already be
+            // stale, and caching it would keep a revoked token alive.
+            if (Interlocked.Read(ref _generation) == generation &&
+                _cache.Count < MaxCacheEntries)
+            {
+                _cache[digest] = new CacheEntry(record, now + CacheLifetime);
+            }
         }
 
         if (record is null)
@@ -155,14 +192,21 @@ public sealed class GatewayTokenStore
         {
             return GatewayTokenResult.Denied(GatewayTokenFailure.Expired, record);
         }
-        if (!string.IsNullOrWhiteSpace(gatewayId) &&
-            !string.Equals(record.GatewayId, gatewayId, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(record.GatewayId, gatewayId, StringComparison.OrdinalIgnoreCase))
         {
             return GatewayTokenResult.Denied(GatewayTokenFailure.GatewayMismatch, record);
         }
 
         MarkUsed(record, now);
         return GatewayTokenResult.Allowed(record);
+    }
+
+    private void Invalidate()
+    {
+        // Bump first: a lookup that reads the database after this point must
+        // see the new generation and refuse to cache a pre-change row.
+        Interlocked.Increment(ref _generation);
+        _cache.Clear();
     }
 
     /// <summary>
@@ -187,6 +231,39 @@ public sealed class GatewayTokenStore
             _logger.LogWarning(exception,
                 "Could not record use of gateway token {Id}", record.Id);
         }
+    }
+
+    /// <summary>
+    /// The id as it may appear in a log line: the value itself when it is a
+    /// valid id, and a fixed placeholder otherwise.
+    /// </summary>
+    public static string ForLog(string? gatewayId) =>
+        IsValidGatewayId(gatewayId) ? gatewayId : "<invalid-id>";
+
+    /// <summary>Longest accepted gateway id, matching the firmware's own limit.</summary>
+    public const int MaxGatewayIdLength = 48;
+
+    /// <summary>
+    /// A gateway id must be a short, printable identifier.  Restricting the
+    /// character set keeps a caller-supplied id out of log lines as anything
+    /// but one token, and keeps junk ids out of the gateways table.
+    /// </summary>
+    public static bool IsValidGatewayId(
+        [NotNullWhen(true)] string? gatewayId)
+    {
+        if (string.IsNullOrEmpty(gatewayId) || gatewayId.Length > MaxGatewayIdLength)
+        {
+            return false;
+        }
+        foreach (var character in gatewayId)
+        {
+            if (!char.IsAsciiLetterOrDigit(character) &&
+                character is not ('-' or '_' or '.'))
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     public static byte[] Digest(string token) =>

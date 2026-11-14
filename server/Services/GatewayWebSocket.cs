@@ -9,6 +9,13 @@ public static class GatewayWebSocket
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
+    /// <summary>
+    /// How long an accepted socket may stay silent before it must have sent
+    /// its hello.  The socket is unauthenticated until then, so it must not be
+    /// able to hold a connection and its receive buffer indefinitely.
+    /// </summary>
+    private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(10);
+
     public static async Task HandleAsync(
         WebSocket socket,
         HttpContext context,
@@ -25,7 +32,27 @@ public static class GatewayWebSocket
         CancellationTokenSource? connectionLifetime = null;
         try
         {
-            var hello = await ReceiveTextAsync(socket, linked.Token);
+            string? hello;
+            using (var helloDeadline = CancellationTokenSource.CreateLinkedTokenSource(
+                linked.Token))
+            {
+                helloDeadline.CancelAfter(HelloTimeout);
+                try
+                {
+                    hello = await ReceiveTextAsync(socket, helloDeadline.Token);
+                }
+                catch (OperationCanceledException)
+                    when (helloDeadline.IsCancellationRequested &&
+                          !linked.IsCancellationRequested)
+                {
+                    logger.LogWarning(
+                        "Gateway WebSocket from {Remote} sent no hello within {Seconds}s",
+                        context.Connection.RemoteIpAddress, HelloTimeout.TotalSeconds);
+                    await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation,
+                        "hello timeout", CancellationToken.None);
+                    return;
+                }
+            }
             if (hello is null)
             {
                 return;
@@ -48,10 +75,13 @@ public static class GatewayWebSocket
                                    spoolValue.TryGetInt32(out var spoolCount)
                     ? spoolCount
                     : 0;
-                if (string.IsNullOrWhiteSpace(gatewayId))
+                if (!GatewayTokenStore.IsValidGatewayId(gatewayId))
                 {
+                    logger.LogWarning(
+                        "Gateway WebSocket from {Remote} sent hello with an " +
+                        "invalid gatewayId", context.Connection.RemoteIpAddress);
                     await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation,
-                        "hello with gatewayId required", linked.Token);
+                        "hello with a valid gatewayId required", linked.Token);
                     return;
                 }
                 // The token is issued for one gatewayId, so a gateway cannot
@@ -61,7 +91,8 @@ public static class GatewayWebSocket
                 {
                     logger.LogWarning(
                         "Rejected gateway WebSocket for {Gateway} from {Remote}: {Reason}",
-                        gatewayId, context.Connection.RemoteIpAddress, auth.Failure);
+                        GatewayTokenStore.ForLog(gatewayId),
+                        context.Connection.RemoteIpAddress, auth.Failure);
                     await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation,
                         "invalid gateway token", linked.Token);
                     return;

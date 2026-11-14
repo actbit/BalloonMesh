@@ -45,6 +45,31 @@ public sealed class GatewayRegistryTests
     }
 
     [Fact]
+    public void ConcurrentUpdatesDoNotLeaveTheRowHoldingTheOlderSnapshot()
+    {
+        var store = new FakeGatewayStateStore();
+        var registry = TestRegistry.Create(new RecordingMonitorEvents(), store);
+        registry.GetOrRegister("gw-01");
+
+        // Readiness and a plain touch race; whichever lands last, the stored
+        // row must not fall back to "not provisioned".
+        Parallel.For(0, 200, i =>
+        {
+            if (i % 2 == 0)
+            {
+                registry.UpdateRuntimeState("gw-01", provisioned: true, spoolPending: null);
+            }
+            else
+            {
+                registry.Touch("gw-01");
+            }
+        });
+
+        var gateway = Assert.Single(store.GetGateways());
+        Assert.True(gateway.Provisioned);
+    }
+
+    [Fact]
     public void LastSeenOnlyChangesDoNotWriteOnEveryRequest()
     {
         var store = new FakeGatewayStateStore();

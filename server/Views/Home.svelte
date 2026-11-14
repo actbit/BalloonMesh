@@ -483,7 +483,18 @@
       addLog('Gateway token: gateway ID is required');
       return;
     }
-    const days = tokenExpiresInDays.trim();
+    // A typo must not silently become a never-expiring token: Number('30d')
+    // is NaN, which JSON.stringify would send as null.
+    const text = tokenExpiresInDays.trim();
+    let days: number | null = null;
+    if (text) {
+      const parsed = Number(text);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 3650) {
+        addLog('Gateway token: expiry must be a whole number of days (1-3650)');
+        return;
+      }
+      days = parsed;
+    }
     busy = true;
     try {
       const result = await api('/api/gateway-tokens', {
@@ -491,7 +502,7 @@
         body: JSON.stringify({
           gatewayId,
           label: tokenLabel.trim() || null,
-          expiresInDays: days ? Number(days) : null
+          expiresInDays: days
         })
       });
       issuedToken = { value: result.token, gatewayId };
