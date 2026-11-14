@@ -7,8 +7,11 @@
 
 #include "cJSON.h"
 #include "esp_log.h"
+#include "esp_ble_mesh_defs.h"
+#include "esp_ble_mesh_provisioning_api.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
@@ -57,7 +60,6 @@ private:
     WiFiClientSecure secure_;
 };
 
-#if defined(BM_DEV_AUTO_PROV) && BM_DEV_AUTO_PROV
 static void encode_device_uuid(char *out, size_t out_size) {
     uint8_t uuid[16] = {0};
     bm_device_uuid(uuid);
@@ -69,6 +71,25 @@ static void encode_device_uuid(char *out, size_t out_size) {
     }
     out[position] = '\0';
 }
+
+struct GatewayMeshConfig {
+    uint16_t mesh_address = 0;
+    uint16_t node_range_start = 0;
+    uint16_t node_range_end = 0;
+};
+
+#if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER
+struct UnprovisionedDevice {
+    uint8_t uuid[16];
+    uint8_t addr[6];
+    uint8_t addr_type;
+    uint16_t oob_info;
+    uint8_t bearer;
+};
+
+static StaticQueue_t s_unprovisioned_queue_storage;
+static uint8_t s_unprovisioned_queue_buffer[4 * sizeof(UnprovisionedDevice)];
+static QueueHandle_t s_unprovisioned_queue;
 #endif
 
 static void prepare_wifi(void) {
@@ -106,11 +127,15 @@ static bool connect_wifi_once(void) {
     return true;
 }
 
-#if defined(BM_DEV_AUTO_PROV) && BM_DEV_AUTO_PROV
-static uint16_t request_development_mesh_address(void) {
-    if (!bm_device_gateway_id_is_valid() || WiFi.status() != WL_CONNECTED) {
-        return 0;
+static bool request_gateway_mesh_address(GatewayMeshConfig *config) {
+    if (config == nullptr || !bm_device_gateway_id_is_valid() ||
+        WiFi.status() != WL_CONNECTED) {
+        return false;
     }
+
+    config->mesh_address = 0;
+    config->node_range_start = BM_DEV_BALLOON_ADDR_MIN;
+    config->node_range_end = BM_DEV_BALLOON_ADDR_MAX;
 
     char device_uuid[33];
     encode_device_uuid(device_uuid, sizeof(device_uuid));
@@ -121,8 +146,8 @@ static uint16_t request_development_mesh_address(void) {
     GatewayHttpClient transport;
     HTTPClient http;
     if (!http.begin(transport.client(), url)) {
-        ESP_LOGW(TAG, "development Mesh address request could not start");
-        return 0;
+        ESP_LOGW(TAG, "gateway Mesh address request could not start");
+        return false;
     }
     http.setTimeout(5000);
     http.addHeader("Content-Type", "application/json");
@@ -134,29 +159,143 @@ static uint16_t request_development_mesh_address(void) {
     snprintf(body, sizeof(body), "{\"deviceUuid\":\"%s\"}", device_uuid);
     int code = http.POST((uint8_t *)body, strlen(body));
     if (code < 200 || code >= 300) {
-        ESP_LOGW(TAG, "development Mesh address request failed HTTP %d", code);
+        ESP_LOGW(TAG, "gateway Mesh address request failed HTTP %d", code);
         http.end();
-        return 0;
+        return false;
     }
 
     String response = http.getString();
     http.end();
     cJSON *root = cJSON_Parse(response.c_str());
     if (root == NULL) {
-        ESP_LOGW(TAG, "development Mesh address response was not JSON");
-        return 0;
+        ESP_LOGW(TAG, "gateway Mesh address response was not JSON");
+        return false;
     }
     cJSON *mesh_address = cJSON_GetObjectItem(root, "meshAddress");
-    uint16_t result = 0;
-    if (cJSON_IsNumber(mesh_address) && mesh_address->valueint >= 0x4000 &&
-        mesh_address->valueint <= 0x7FFF) {
-        result = (uint16_t)mesh_address->valueint;
+    bool valid = cJSON_IsNumber(mesh_address) &&
+                 mesh_address->valueint >= BM_DEV_GATEWAY_ADDR_MIN &&
+                 mesh_address->valueint <= BM_DEV_GATEWAY_ADDR_MAX;
+    if (valid) {
+        config->mesh_address = (uint16_t)mesh_address->valueint;
+    }
+    cJSON *range_start = cJSON_GetObjectItem(root, "rangeStart");
+    cJSON *range_end = cJSON_GetObjectItem(root, "rangeEnd");
+    if (cJSON_IsNumber(range_start) && cJSON_IsNumber(range_end) &&
+        range_start->valueint >= BM_DEV_BALLOON_ADDR_MIN &&
+        range_end->valueint <= BM_DEV_BALLOON_ADDR_MAX &&
+        range_start->valueint <= range_end->valueint) {
+        config->node_range_start = (uint16_t)range_start->valueint;
+        config->node_range_end = (uint16_t)range_end->valueint;
     }
     cJSON_Delete(root);
-    if (result == 0) {
-        ESP_LOGW(TAG, "development Mesh address response was invalid");
+    if (!valid) {
+        ESP_LOGW(TAG, "gateway Mesh address response was invalid");
     }
-    return result;
+    return valid;
+}
+
+#if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER
+static bool request_gateway_mesh_node_address(const uint8_t uuid[16],
+                                              uint16_t *mesh_address) {
+    if (uuid == nullptr || mesh_address == nullptr || WiFi.status() != WL_CONNECTED) {
+        return false;
+    }
+    *mesh_address = 0;
+    char uuid_text[33];
+    static const char digits[] = "0123456789ABCDEF";
+    for (size_t i = 0; i < 16; ++i) {
+        uuid_text[i * 2] = digits[uuid[i] >> 4];
+        uuid_text[i * 2 + 1] = digits[uuid[i] & 0x0F];
+    }
+    uuid_text[32] = '\0';
+
+    char url[240];
+    snprintf(url, sizeof(url), "%s/api/gateway/%s/mesh-node-address", BM_SERVER_URL,
+             bm_device_gateway_id());
+    GatewayHttpClient transport;
+    HTTPClient http;
+    if (!http.begin(transport.client(), url)) {
+        return false;
+    }
+    http.setTimeout(5000);
+    http.addHeader("Content-Type", "application/json");
+    if (strlen(BM_GATEWAY_TOKEN) > 0) {
+        http.addHeader("X-Gateway-Token", BM_GATEWAY_TOKEN);
+    }
+    char body[64];
+    snprintf(body, sizeof(body), "{\"deviceUuid\":\"%s\"}", uuid_text);
+    int code = http.POST((uint8_t *)body, strlen(body));
+    if (code < 200 || code >= 300) {
+        ESP_LOGW(TAG, "node Mesh address request failed HTTP %d", code);
+        http.end();
+        return false;
+    }
+    String response = http.getString();
+    http.end();
+    cJSON *root = cJSON_Parse(response.c_str());
+    if (root == nullptr) {
+        return false;
+    }
+    cJSON *value = cJSON_GetObjectItem(root, "meshAddress");
+    bool valid = cJSON_IsNumber(value) &&
+                 value->valueint >= BM_DEV_BALLOON_ADDR_MIN &&
+                 value->valueint <= BM_DEV_BALLOON_ADDR_MAX;
+    if (valid) {
+        *mesh_address = (uint16_t)value->valueint;
+    }
+    cJSON_Delete(root);
+    return valid;
+}
+
+static void provisioner_task(void *argument) {
+    (void)argument;
+    UnprovisionedDevice device;
+    for (;;) {
+        if (xQueueReceive(s_unprovisioned_queue, &device, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        if (!connect_wifi_once()) {
+            ESP_LOGW(TAG, "cannot allocate node address while Wi-Fi is offline");
+            continue;
+        }
+        uint16_t mesh_address = 0;
+        if (!request_gateway_mesh_node_address(device.uuid, &mesh_address)) {
+            ESP_LOGW(TAG, "node address was not allocated; another Provisioner may own it");
+            continue;
+        }
+        esp_ble_mesh_bd_addr_t addr = {0};
+        memcpy(addr, device.addr, sizeof(addr));
+        esp_err_t err = esp_ble_mesh_provisioner_prov_device_with_addr(
+            device.uuid, addr,
+            (esp_ble_mesh_addr_type_t)device.addr_type,
+            (esp_ble_mesh_prov_bearer_t)device.bearer,
+            device.oob_info, mesh_address);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "starting provisioning for 0x%04x failed: %s",
+                     mesh_address, esp_err_to_name(err));
+        } else {
+            ESP_LOGI(TAG, "provisioning queued: addr=0x%04x", mesh_address);
+        }
+    }
+}
+
+extern "C" void bm_gateway_mesh_on_unprov_device(const uint8_t uuid[16],
+                                                   const uint8_t addr[6],
+                                                   uint8_t addr_type,
+                                                   uint16_t oob_info,
+                                                   uint8_t bearer) {
+    if (s_unprovisioned_queue == nullptr || uuid == nullptr || addr == nullptr) {
+        return;
+    }
+    UnprovisionedDevice device{};
+    memcpy(device.uuid, uuid, sizeof(device.uuid));
+    memcpy(device.addr, addr, sizeof(device.addr));
+    device.addr_type = addr_type;
+    device.oob_info = oob_info;
+    device.bearer = bearer;
+    if (xQueueSend(s_unprovisioned_queue, &device, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "unprovisioned device queue full");
+    }
 }
 #endif
 
@@ -404,22 +543,37 @@ void setup() {
     Serial.println("[GW] spool initialized");
     Serial.flush();
 
+    GatewayMeshConfig mesh_config;
     uint16_t development_address = 0;
-#if defined(BM_DEV_AUTO_PROV) && BM_DEV_AUTO_PROV
     prepare_wifi();
     if (connect_wifi_once()) {
-        development_address = request_development_mesh_address();
+        (void)request_gateway_mesh_address(&mesh_config);
+        development_address = mesh_config.mesh_address;
     }
-    if (development_address == 0) {
-        ESP_LOGE(TAG, "central development Mesh address unavailable; auto-provisioning disabled");
+    if (mesh_config.mesh_address == 0) {
+        ESP_LOGE(TAG, "central gateway Mesh address unavailable; Provisioner will not start");
     }
+
+#if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER
+    s_unprovisioned_queue = xQueueCreateStatic(
+        4, sizeof(UnprovisionedDevice), s_unprovisioned_queue_buffer,
+        &s_unprovisioned_queue_storage);
 #endif
 
     Serial.println("[GW] calling bm_gateway_mesh_init...");
     Serial.flush();
-    bm_gateway_mesh_init(development_address);
+    bm_gateway_mesh_init(development_address,
+                         mesh_config.mesh_address,
+                         mesh_config.node_range_start,
+                         mesh_config.node_range_end);
     Serial.println("[GW] mesh initialized");
     Serial.flush();
+
+#if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER
+    xTaskCreate(provisioner_task, "gateway_provision", 6144, NULL, 5, NULL);
+    Serial.println("[GW] provisioner task started");
+    Serial.flush();
+#endif
 
     xTaskCreate(wifi_task, "gateway_wifi", 4096, NULL, 5, NULL);
     Serial.println("[GW] wifi_task started");

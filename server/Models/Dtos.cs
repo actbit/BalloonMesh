@@ -153,6 +153,8 @@ public sealed record GatewayCommandsRequest(IReadOnlyList<GatewayCommandDto> Com
 
 public sealed record GatewayMeshAddressRequest(string DeviceUuid);
 
+public sealed record GatewayMeshNodeAddressRequest(string DeviceUuid);
+
 public sealed record DownlinkCommand(ushort Dst, uint Opcode, byte[] Payload, int Ttl)
 {
     public GatewayCommandDto ToDto() => new(Dst, Opcode, Convert.ToHexString(Payload), Ttl);

@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "bm_config.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -18,9 +20,21 @@ typedef struct {
     uint32_t received_ms;
 } bm_gateway_event_t;
 
-/* development_address is supplied by the central dev allocator when the
- * development auto-provisioning profile is enabled; zero disables that path. */
-void bm_gateway_mesh_init(uint16_t development_address);
+/* The gateway address is server-assigned.  Provisioner node addresses are
+ * requested from the server per device; the range values are returned for
+ * diagnostics and future prefetching. */
+void bm_gateway_mesh_init(uint16_t development_address,
+                          uint16_t provisioner_address,
+                          uint16_t node_range_start,
+                          uint16_t node_range_end);
+
+#if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER
+void bm_gateway_mesh_on_unprov_device(const uint8_t uuid[16],
+                                      const uint8_t addr[6],
+                                      uint8_t addr_type,
+                                      uint16_t oob_info,
+                                      uint8_t bearer);
+#endif
 bool bm_gateway_mesh_is_provisioned(void);
 /* True only when provisioning is complete and both vendor models are bound to
  * the AppKey.  Downlinks can only be sent in this state. */

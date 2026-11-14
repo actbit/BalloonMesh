@@ -281,14 +281,16 @@ dotnet run --project server/BalloonMesh.Server.csproj --urls http://localhost:50
 
 ## オンボーディング表示（MOCK）
 
-実機 BLE Mesh Provisioner はまだ未実装のため、Web UI に **Admin 専用の MOCK オンボーディングパネル**を表示します。
+実機 Gateway は BLE Mesh Provisioner として自動動作します。Web UI の **Admin 専用 MOCK オンボーディングパネル**は、実機なしで画面を確認するための別系統のシミュレーションです。
 
 - `GET /api/onboarding/mock` — モックデバイス一覧
 - `POST /api/onboarding/mock/{id}/provision` — 数秒かけて `unprovisioned → provisioning → provisioned` をシミュレーション
 - `POST /api/onboarding/mock/reset` — 初期状態へ戻す
 - SignalR `onboardingUpdated` で接続中の全クライアントに反映（REST API は Admin のみ）
 
-実際の Provisioner 本体 / 鍵配布 / model bind / グループ購読の自動化は未実装です（ファームウェアは Provision 完了後に固定グループへ subscribe します）。
+実機の割り当てはサーバーが一元管理します。`POST /api/gateway/{id}/mesh-address` でGateway自身のユニキャストアドレスとノード範囲を払い出し、`POST /api/gateway/{id}/mesh-node-address` でUUIDごとの安定したノードアドレスを払い出します。各Gatewayは最初に64アドレス、使い切ると16アドレスずつ追加され、複数Gateway間で範囲は重複しません。同じUUIDを別Gatewayが先に取得済みならHTTP 409となり、二重Provisioningを防ぎます。
+
+Web UI のGatewayパネルでは、Gatewayアドレス、払い出し済み範囲、範囲ごとの使用数を確認できます。
 
 ### 5. ファームウェア
 
@@ -312,7 +314,7 @@ pio run -t upload
 |---|---|---|
 | `firmware/balloon` | バルーン | Wi-Fi FTM Initiator、BLE Mesh Node、RGB LEDC |
 | `firmware/anchor` | GPS 基準局 | NMEA UART、SoftAP、FTM Responder、UDP |
-| `firmware/gateway` | Mesh Gateway | BLE Mesh Node、WebSocket（既定）/ HTTP ポーリング |
+| `firmware/gateway` | Mesh Gateway / Provisioner | BLE Mesh Provisioner、WebSocket（既定）/ HTTP ポーリング |
 
 `anchor` は `platformio.ini` の `-DBM_ANCHOR_ID=N` で ID を変えてビルドします。`gateway` のIDはBluetooth MACから自動生成され、必要な場合だけ `firmware/shared/balloon_common/include/bm_config.h` の `BM_GATEWAY_ID` / `BM_SERVER_URL` / Wi-Fi 設定（または `platformio.ini` の `-D` 上書き）を変更してください。`balloon` は通常の `balloon` 環境に加え、測位を無効化した BLE Mesh 立ち上げ用の `balloon-mesh-bringup` 環境も利用できます。
 
@@ -446,8 +448,8 @@ FTM_REPORT の 4B timestamp は、確定仕様で未決定のため **LED tick40
 
 ## 既知の制約・注意
 
-1. **BLE Mesh Node のビルド構成**
-   `balloon` と `gateway` は `framework = arduino, espidf` とし、ESP-IDF 4.4.7 を Arduino のコンポーネントとして組み込みます。`sdkconfig.defaults` で `CONFIG_BLE_MESH_NODE=y` と `CONFIG_BLE_MESH_SETTINGS=y` を有効にして Bluetooth スタックをソースからビルドするため、Arduino 同梱のプリビルド `libbt.a` は使いません。`balloon` はさらに `CONFIG_ESP_WIFI_FTM_ENABLE=y` / `CONFIG_ESP_WIFI_FTM_INITIATOR_SUPPORT=y` を有効にします。`-DCONFIG_BLE_MESH_NODE=1` も不要です。Provisioning 情報（ユニキャストアドレス、NetKey/AppKey、model bind、group subscription、SEQ/RPL）は NVS に保存され、再起動後も復元されます。初回ビルドは ESP-IDF 全体を作るため時間がかかりますが、2 回目以降は差分ビルドになります。詳細は [firmware/README.md](firmware/README.md) と [docs/decisions.md](docs/decisions.md) の項目 12 を参照してください。
+1. **BLE Mesh Node / Provisioner のビルド構成**
+   `balloon` と `gateway` は `framework = arduino, espidf` とし、ESP-IDF 4.4.7 を Arduino のコンポーネントとして組み込みます。`sdkconfig.defaults` で `CONFIG_BLE_MESH_NODE=y`、`CONFIG_BLE_MESH_PROVISIONER=y`、`CONFIG_BLE_MESH_CFG_CLI=y`、`CONFIG_BLE_MESH_SETTINGS=y` を有効にして Bluetooth スタックをソースからビルドするため、Arduino 同梱のプリビルド `libbt.a` は使いません。Provisioning 情報（ユニキャストアドレス、NetKey/AppKey、model bind、group subscription、SEQ/RPL）は NVS に保存され、再起動後も復元されます。初回ビルドは ESP-IDF 全体を作るため時間がかかりますが、2 回目以降は差分ビルドになります。詳細は [firmware/README.md](firmware/README.md) と [docs/decisions.md](docs/decisions.md) の項目 12 を参照してください。
 2. **Gateway の Protocol C**  
    サーバは WebSocket と HTTP ポーリングの両方を実装しています。Arduino Gateway は既定で WebSocket（`BM_GATEWAY_USE_WEBSOCKET=1`）を使用し、`BM_SERVER_URL` が `https://` の場合は WSS になります。HTTP ポーリングへ戻す場合は `platformio.ini` のフラグを 0 にしてください。CA を `BM_TLS_CA_CERT` で指定しない場合は証明書ピン留めなしになるため、本番では必ず CA を設定してください。
 3. **FTM timestamp** と **NEIGHBOR_REPORT の 2 件/パケット** は仕様未確定のため暫定値です。実装凍結前に [docs/decisions.md](docs/decisions.md) の項目を確定してください。
@@ -457,3 +459,4 @@ FTM_REPORT の 4B timestamp は、確定仕様で未決定のため **LED tick40
 6. **デモシミュレーション** はサーバ内で FTM 報告を合成します。実機 Gateway がない状態でも UI と集約ロジックを確認できますが、電波・Mesh の実特性は再現しません。
 7. **UI の CDN 依存**  MapLibre GL JS と SignalR ブラウザクライアントは CDN から遅延ロードします。閉域網ではこれらのファイルを `wwwroot` 等に配置し、`Home.svelte` の URL を差し替えてください。
 8. **認証**  Gateway の共有トークン認証（`Gateway:Token`）は実装済みです。Protocol A は 8B 共有トークンのみ、WSS は CA 未設定時に証明書ピン留めなしです。本番では TLS 証明書検証 / トークンローテーション / 署名付きコマンドを追加してください。
+9. **Provisioner 鍵**  現在のGateway Provisionerは開発と本番の動作差を減らすため共有のプロトタイプ鍵を使用しています。本番投入前にNetKey/AppKeyを安全なNVS領域またはデバイス固有のProvisioning経路へ移し、鍵ローテーションを追加してください。

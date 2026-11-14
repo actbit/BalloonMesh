@@ -39,6 +39,9 @@ static EventGroupHandle_t s_state_events;
 static StaticSemaphore_t s_state_lock_storage;
 static SemaphoreHandle_t s_state_lock;
 static volatile uint16_t s_primary_addr = ESP_BLE_MESH_ADDR_UNASSIGNED;
+static volatile uint16_t s_provisioner_address = ESP_BLE_MESH_ADDR_UNASSIGNED;
+static uint16_t s_node_range_start = BM_DEV_BALLOON_ADDR_MIN;
+static uint16_t s_node_range_end = BM_DEV_BALLOON_ADDR_MAX;
 static esp_timer_handle_t s_bind_retry_timer;
 static uint32_t s_bind_retry_delay_ms = 1000;
 static uint8_t s_bind_retry_attempts;
@@ -172,6 +175,10 @@ static esp_ble_mesh_cfg_srv_t s_config_server = {
     .default_ttl = 7,
 };
 
+#if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER
+static esp_ble_mesh_client_t s_config_client;
+#endif
+
 ESP_BLE_MESH_HEALTH_PUB_DEFINE(s_health_pub, 0, ROLE_NODE);
 static const uint8_t s_health_test_ids[] = {
     ESP_BLE_MESH_HEALTH_STANDARD_TEST,
@@ -193,6 +200,9 @@ static esp_ble_mesh_model_op_t s_telemetry_ops[] = {
 
 static esp_ble_mesh_model_t s_root_models[] = {
     ESP_BLE_MESH_MODEL_CFG_SRV(&s_config_server),
+#if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER
+    ESP_BLE_MESH_MODEL_CFG_CLI(&s_config_client),
+#endif
     ESP_BLE_MESH_MODEL_HEALTH_SRV(&s_health_server, &s_health_pub),
 };
 
@@ -227,6 +237,18 @@ static esp_ble_mesh_comp_t s_composition = {
 
 static esp_ble_mesh_prov_t s_prov = {
     .uuid = s_prov_uuid,
+#if defined(CONFIG_BLE_MESH_PROVISIONER) && CONFIG_BLE_MESH_PROVISIONER
+    .prov_uuid = s_prov_uuid,
+    .prov_unicast_addr = 0x0001,
+    .prov_start_address = BM_DEV_BALLOON_ADDR_MIN,
+    .prov_attention = 0,
+    .prov_algorithm = 0,
+    .prov_pub_key_oob = 0,
+    .prov_static_oob_val = NULL,
+    .prov_static_oob_len = 0,
+    .flags = 0,
+    .iv_index = 0,
+#endif
 };
 
 static void bind_vendor_models(uint16_t addr, bool reset_backoff);
@@ -319,6 +341,244 @@ static void configure_vendor_models(void) {
     ESP_LOGI(TAG, "gateway mesh primary address 0x%04x", addr);
 }
 
+#if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER && \
+    defined(CONFIG_BLE_MESH_PROVISIONER) && CONFIG_BLE_MESH_PROVISIONER
+
+static uint16_t s_config_target_addr = ESP_BLE_MESH_ADDR_UNASSIGNED;
+static uint8_t s_config_step;
+static bool s_provisioner_ready;
+
+static void provisioner_configure_next(void);
+
+static void provisioner_bind_local_models(void) {
+    const uint16_t model_ids[] = {
+        ESP_BLE_MESH_MODEL_ID_CONFIG_CLI,
+        BM_MODEL_ID_CONTROL,
+        BM_MODEL_ID_TELEMETRY,
+    };
+    const uint16_t company_ids[] = {
+        ESP_BLE_MESH_CID_NVAL,
+        BM_COMPANY_ID_LOCAL,
+        BM_COMPANY_ID_LOCAL,
+    };
+    for (size_t i = 0; i < sizeof(model_ids) / sizeof(model_ids[0]); ++i) {
+        esp_err_t err = esp_ble_mesh_provisioner_bind_app_key_to_local_model(
+            s_provisioner_address, BM_APP_IDX, model_ids[i], company_ids[i]);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "bind local model 0x%04x failed: %s",
+                     model_ids[i], esp_err_to_name(err));
+        }
+    }
+}
+
+static void provisioner_mark_ready(void) {
+    esp_err_t subscribe_err = esp_ble_mesh_model_subscribe_group_addr(
+        s_provisioner_address, BM_COMPANY_ID_LOCAL, BM_MODEL_ID_TELEMETRY,
+        BM_GROUP_GATEWAY);
+    if (subscribe_err != ESP_OK && subscribe_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "subscribe gateway telemetry group failed: %s",
+                 esp_err_to_name(subscribe_err));
+    }
+    s_provisioner_ready = true;
+    s_primary_addr = s_provisioner_address;
+    state_lock();
+    xEventGroupSetBits(s_state_events,
+                       BM_MESH_STATE_PROVISIONED |
+                       BM_MESH_STATE_CONTROL_BOUND |
+                       BM_MESH_STATE_TELEMETRY_BOUND);
+    state_unlock();
+    ESP_LOGI(TAG, "gateway Provisioner ready: addr=0x%04x node-range=0x%04x..0x%04x",
+             s_provisioner_address, s_node_range_start, s_node_range_end);
+}
+
+static void provisioner_enable_after_keys(void) {
+    if (s_provisioner_ready) {
+        return;
+    }
+    if (esp_ble_mesh_provisioner_get_local_net_key(BM_NET_IDX) == NULL ||
+        esp_ble_mesh_provisioner_get_local_app_key(BM_NET_IDX, BM_APP_IDX) == NULL) {
+        return;
+    }
+    provisioner_bind_local_models();
+    esp_err_t err = esp_ble_mesh_provisioner_prov_enable(
+        (esp_ble_mesh_prov_bearer_t)(ESP_BLE_MESH_PROV_ADV | ESP_BLE_MESH_PROV_GATT));
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "Provisioner enable failed: %s", esp_err_to_name(err));
+        return;
+    }
+    provisioner_mark_ready();
+}
+
+static void provisioner_start(uint16_t address, uint16_t range_start) {
+    if (address == ESP_BLE_MESH_ADDR_UNASSIGNED ||
+        address > BM_DEV_GATEWAY_ADDR_MAX ||
+        range_start < BM_DEV_BALLOON_ADDR_MIN ||
+        range_start > BM_DEV_BALLOON_ADDR_MAX) {
+        ESP_LOGE(TAG, "invalid Provisioner identity addr=0x%04x range=0x%04x",
+                 address, range_start);
+        return;
+    }
+    s_provisioner_address = address;
+    s_node_range_start = range_start;
+    s_prov.prov_start_address = range_start;
+    esp_err_t err = esp_ble_mesh_provisioner_set_primary_elem_addr(address);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "setting Provisioner primary address failed: %s",
+                 esp_err_to_name(err));
+        return;
+    }
+
+    if (esp_ble_mesh_provisioner_get_local_net_key(BM_NET_IDX) == NULL) {
+        err = esp_ble_mesh_provisioner_add_local_net_key(BM_DEV_NET_KEY, BM_NET_IDX);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "adding Provisioner NetKey failed: %s", esp_err_to_name(err));
+            return;
+        }
+    } else if (esp_ble_mesh_provisioner_get_local_app_key(BM_NET_IDX, BM_APP_IDX) == NULL) {
+        err = esp_ble_mesh_provisioner_add_local_app_key(BM_DEV_APP_KEY, BM_NET_IDX, BM_APP_IDX);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "adding Provisioner AppKey failed: %s", esp_err_to_name(err));
+            return;
+        }
+    } else {
+        provisioner_enable_after_keys();
+    }
+}
+
+static void config_client_set_common(esp_ble_mesh_client_common_param_t *common,
+                                      uint32_t opcode) {
+    memset(common, 0, sizeof(*common));
+    common->opcode = opcode;
+    common->model = s_config_client.model;
+    common->ctx.net_idx = BM_NET_IDX;
+    common->ctx.app_idx = BM_APP_IDX;
+    common->ctx.addr = s_config_target_addr;
+    common->ctx.send_ttl = 7;
+    common->ctx.send_rel = false;
+    common->msg_timeout = 5000;
+    common->msg_role = ROLE_PROVISIONER;
+}
+
+static void provisioner_configure_next(void) {
+    if (!s_provisioner_ready || s_config_target_addr == ESP_BLE_MESH_ADDR_UNASSIGNED) {
+        return;
+    }
+
+    esp_ble_mesh_client_common_param_t common;
+    esp_ble_mesh_cfg_client_set_state_t set_state = {0};
+    esp_err_t err;
+    if (s_config_step == 1) {
+        config_client_set_common(&common, ESP_BLE_MESH_MODEL_OP_APP_KEY_ADD);
+        set_state.app_key_add.net_idx = BM_NET_IDX;
+        set_state.app_key_add.app_idx = BM_APP_IDX;
+        memcpy(set_state.app_key_add.app_key, BM_DEV_APP_KEY, sizeof(BM_DEV_APP_KEY));
+        err = esp_ble_mesh_config_client_set_state(&common, &set_state);
+    } else if (s_config_step == 2 || s_config_step == 3) {
+        const uint16_t model_id = s_config_step == 2
+                                      ? BM_MODEL_ID_CONTROL
+                                      : BM_MODEL_ID_TELEMETRY;
+        config_client_set_common(&common, ESP_BLE_MESH_MODEL_OP_MODEL_APP_BIND);
+        set_state.model_app_bind.element_addr = s_config_target_addr;
+        set_state.model_app_bind.model_app_idx = BM_APP_IDX;
+        set_state.model_app_bind.company_id = BM_COMPANY_ID_LOCAL;
+        set_state.model_app_bind.model_id = model_id;
+        err = esp_ble_mesh_config_client_set_state(&common, &set_state);
+    } else {
+        s_config_target_addr = ESP_BLE_MESH_ADDR_UNASSIGNED;
+        return;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "remote node configuration step %u failed: %s",
+                 s_config_step, esp_err_to_name(err));
+    }
+}
+
+static void config_client_cb(esp_ble_mesh_cfg_client_cb_event_t event,
+                             esp_ble_mesh_cfg_client_cb_param_t *param) {
+    if (param == NULL || param->params == NULL ||
+        s_config_target_addr == ESP_BLE_MESH_ADDR_UNASSIGNED) {
+        return;
+    }
+    uint32_t opcode = param->params->opcode;
+    if (event == ESP_BLE_MESH_CFG_CLIENT_TIMEOUT_EVT) {
+        provisioner_configure_next();
+        return;
+    }
+    if (event != ESP_BLE_MESH_CFG_CLIENT_SET_STATE_EVT || param->error_code != ESP_OK) {
+        return;
+    }
+
+    uint8_t status = 0xFF;
+    if (opcode == ESP_BLE_MESH_MODEL_OP_APP_KEY_ADD) {
+        status = param->status_cb.appkey_status.status;
+    } else if (opcode == ESP_BLE_MESH_MODEL_OP_MODEL_APP_BIND) {
+        status = param->status_cb.model_app_status.status;
+    } else {
+        return;
+    }
+    if (status != 0) {
+        ESP_LOGW(TAG, "remote node configuration opcode 0x%04lx status=%u",
+                 (unsigned long)opcode, status);
+        s_config_target_addr = ESP_BLE_MESH_ADDR_UNASSIGNED;
+        return;
+    }
+    s_config_step++;
+    provisioner_configure_next();
+}
+
+static void provisioner_prov_cb(esp_ble_mesh_prov_cb_event_t event,
+                                esp_ble_mesh_prov_cb_param_t *param) {
+    if (param == NULL) {
+        return;
+    }
+    switch (event) {
+        case ESP_BLE_MESH_PROVISIONER_PROV_ENABLE_COMP_EVT:
+            ESP_LOGI(TAG, "Provisioner enable result=%d",
+                     param->provisioner_prov_enable_comp.err_code);
+            break;
+        case ESP_BLE_MESH_PROVISIONER_RECV_UNPROV_ADV_PKT_EVT:
+            if (!s_provisioner_ready) {
+                return;
+            }
+            bm_gateway_mesh_on_unprov_device(
+                param->provisioner_recv_unprov_adv_pkt.dev_uuid,
+                param->provisioner_recv_unprov_adv_pkt.addr,
+                (uint8_t)param->provisioner_recv_unprov_adv_pkt.addr_type,
+                param->provisioner_recv_unprov_adv_pkt.oob_info,
+                (uint8_t)param->provisioner_recv_unprov_adv_pkt.bearer);
+            break;
+        case ESP_BLE_MESH_PROVISIONER_PROV_COMPLETE_EVT:
+            ESP_LOGI(TAG, "Provisioned node addr=0x%04x elements=%u",
+                     param->provisioner_prov_complete.unicast_addr,
+                     param->provisioner_prov_complete.element_num);
+            s_config_target_addr = param->provisioner_prov_complete.unicast_addr;
+            s_config_step = 1;
+            provisioner_configure_next();
+            break;
+        case ESP_BLE_MESH_PROVISIONER_ADD_LOCAL_NET_KEY_COMP_EVT:
+            if (param->provisioner_add_net_key_comp.err_code == ESP_OK ||
+                param->provisioner_add_net_key_comp.err_code == -EALREADY) {
+                if (esp_ble_mesh_provisioner_get_local_app_key(BM_NET_IDX, BM_APP_IDX) == NULL) {
+                    (void)esp_ble_mesh_provisioner_add_local_app_key(
+                        BM_DEV_APP_KEY, BM_NET_IDX, BM_APP_IDX);
+                } else {
+                    provisioner_enable_after_keys();
+                }
+            }
+            break;
+        case ESP_BLE_MESH_PROVISIONER_ADD_LOCAL_APP_KEY_COMP_EVT:
+            if (param->provisioner_add_app_key_comp.err_code == ESP_OK ||
+                param->provisioner_add_app_key_comp.err_code == -EALREADY) {
+                provisioner_enable_after_keys();
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+#endif
+
 static void handle_vendor_model_bind_result(const esp_ble_mesh_prov_cb_param_t *param) {
     if (param == NULL) {
         return;
@@ -371,6 +631,17 @@ static void handle_vendor_model_bind_result(const esp_ble_mesh_prov_cb_param_t *
 
 static void prov_cb(esp_ble_mesh_prov_cb_event_t event,
                     esp_ble_mesh_prov_cb_param_t *param) {
+#if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER && \
+    defined(CONFIG_BLE_MESH_PROVISIONER) && CONFIG_BLE_MESH_PROVISIONER
+    if (event >= ESP_BLE_MESH_PROVISIONER_PROV_ENABLE_COMP_EVT) {
+        provisioner_prov_cb(event, param);
+        if (event == ESP_BLE_MESH_PROVISIONER_ADD_LOCAL_NET_KEY_COMP_EVT ||
+            event == ESP_BLE_MESH_PROVISIONER_ADD_LOCAL_APP_KEY_COMP_EVT) {
+            provisioner_enable_after_keys();
+        }
+        return;
+    }
+#endif
     if (event == ESP_BLE_MESH_NODE_PROV_ENABLE_COMP_EVT) {
         int err_code = param == NULL ? ESP_FAIL : param->node_prov_enable_comp.err_code;
         if (err_code == ESP_OK) {
@@ -536,7 +807,10 @@ static void custom_model_cb(esp_ble_mesh_model_cb_event_t event,
     bm_gateway_spool_add(&mesh_event);
 }
 
-void bm_gateway_mesh_init(uint16_t development_address) {
+void bm_gateway_mesh_init(uint16_t development_address,
+                          uint16_t provisioner_address,
+                          uint16_t node_range_start,
+                          uint16_t node_range_end) {
     ESP_LOGI(TAG, "step 1: event group and mutex");
     s_state_events = xEventGroupCreateStatic(&s_state_events_storage);
     if (s_state_events == NULL) {
@@ -573,10 +847,20 @@ void bm_gateway_mesh_init(uint16_t development_address) {
     ESP_LOGI(TAG, "step 6: bluedroid enable");
     ESP_ERROR_CHECK(esp_bluedroid_enable());
     bm_device_uuid(s_prov_uuid);
+#if defined(CONFIG_BLE_MESH_PROVISIONER) && CONFIG_BLE_MESH_PROVISIONER
+    if (node_range_start >= BM_DEV_BALLOON_ADDR_MIN &&
+        node_range_start <= BM_DEV_BALLOON_ADDR_MAX) {
+        s_prov.prov_start_address = node_range_start;
+    }
+#endif
 
     ESP_LOGI(TAG, "step 7: register callbacks");
     ESP_ERROR_CHECK(esp_ble_mesh_register_prov_callback(prov_cb));
     ESP_ERROR_CHECK(esp_ble_mesh_register_config_server_callback(config_server_cb));
+#if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER && \
+    defined(CONFIG_BLE_MESH_PROVISIONER) && CONFIG_BLE_MESH_PROVISIONER
+    ESP_ERROR_CHECK(esp_ble_mesh_register_config_client_callback(config_client_cb));
+#endif
     ESP_ERROR_CHECK(esp_ble_mesh_register_health_server_callback(health_server_cb));
     ESP_ERROR_CHECK(esp_ble_mesh_register_custom_model_callback(custom_model_cb));
     ESP_LOGI(TAG, "step 8: esp_ble_mesh_init");
@@ -586,7 +870,14 @@ void bm_gateway_mesh_init(uint16_t development_address) {
      * esp_ble_mesh_client_model_send_msg() fails with -EINVAL. */
     ESP_ERROR_CHECK(esp_ble_mesh_client_model_init(&s_vendor_models[0]));
 
-    ESP_LOGI(TAG, "step 10: auto prov");
+    ESP_LOGI(TAG, "step 10: mesh role setup");
+#if defined(BM_GATEWAY_PROVISIONER) && BM_GATEWAY_PROVISIONER && \
+    defined(CONFIG_BLE_MESH_PROVISIONER) && CONFIG_BLE_MESH_PROVISIONER
+    s_node_range_end = node_range_end >= node_range_start
+                           ? node_range_end
+                           : BM_DEV_BALLOON_ADDR_MAX;
+    provisioner_start(provisioner_address, node_range_start);
+#else
 #if defined(BM_DEV_AUTO_PROV) && BM_DEV_AUTO_PROV
     uint16_t auto_addr = BM_DEV_UNICAST_ADDR != 0
                              ? BM_DEV_UNICAST_ADDR
@@ -629,6 +920,7 @@ void bm_gateway_mesh_init(uint16_t development_address) {
     } else {
         start_provisioning();
     }
+#endif
 #endif
     ESP_LOGI(TAG, "gateway mesh initialized (provisioned=%d)", (int)mesh_is_provisioned());
 }

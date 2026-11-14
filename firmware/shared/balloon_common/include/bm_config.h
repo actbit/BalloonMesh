@@ -41,11 +41,17 @@
 #define BM_DEV_UNICAST_ADDR 0u
 #endif
 
-/* Separate development ranges keep gateway and balloon addresses apart. */
+/* Gateway Provisioners use the low unicast range for their own element and
+ * the node range below for balloons.  The server reserves node addresses per
+ * Provisioner in chunks (64 initially, then 16). */
 #define BM_DEV_BALLOON_ADDR_MIN 0x0100u
 #define BM_DEV_BALLOON_ADDR_MAX 0x3FFFu
-#define BM_DEV_GATEWAY_ADDR_MIN 0x4000u
-#define BM_DEV_GATEWAY_ADDR_MAX 0x7FFFu
+#define BM_DEV_GATEWAY_ADDR_MIN 0x0001u
+#define BM_DEV_GATEWAY_ADDR_MAX 0x00FFu
+
+#ifndef BM_GATEWAY_PROVISIONER
+#define BM_GATEWAY_PROVISIONER 1
+#endif
 
 /* XIAO ESP32C3 BOOT button.  The button is active-low and is checked after
  * normal application startup, not while the ROM bootloader samples straps. */

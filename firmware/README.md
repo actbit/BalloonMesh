@@ -83,13 +83,13 @@ balloon は XIAO ESP32C3 の **D0/D1/D2 (GPIO2/3/4)** を **LEDC 5kHz / 8bit** �
 ### gateway
 - `platformio.ini` の `BM_GATEWAY_USE_WEBSOCKET=1`（既定）
   - `0` にすると HTTP ポーリングへ切り替え
-- `gateway` / `gateway-dev` 環境は起動後に BOOT ボタンを3秒長押しするとNVSを消去できる。`gateway-dev` はWi-Fiでサーバーから未使用の `0x4000-0x7FFF` を取得して開発用自動provisioningを行い、通常の `gateway` 環境は標準Provisionerによるprovisioning情報を使用する。
+- `gateway` / `gateway-dev` 環境は起動後に BOOT ボタンを3秒長押しするとNVSを消去できる。両環境ともGateway自身が標準Provisionerとして動作し、Wi-FiでサーバーからGatewayアドレスとノード範囲を取得する。ノード範囲は最初の64アドレスを使い切ると16アドレスずつ追加されるため、開発用と本番用でProvisionerの動作差はありません。
 - Gateway IDはBluetooth MACから自動生成される。再現性が必要なテストや既存設備との互換性が必要な場合だけ `BM_GATEWAY_ID` をbuild flagで上書きする。`BM_SERVER_URL` / Wi-Fi 設定も `bm_config.h` で指定する。
 - WSS/HTTPS の CA は `-DBM_TLS_CA_CERT=\"...\"` で指定
 
 BOOTを押したままリセットするとESP32-C3のROM書き込みモードに入るため、NVS消去は通常起動後に実行する。
 
-開発用アドレスはballoonが `0x0100-0x3FFF`、gatewayが `0x4000-0x7FFF` の範囲を使う。gatewayの開発用アドレスはサーバーの台帳で個体ごとに予約される。再現性が必要なテストでは `BM_DEV_UNICAST_ADDR` をbuild flagで上書きできる。
+MeshアドレスはGateway自身が `0x0001-0x00FF`、バルーンなどのノードが `0x0100-0x3FFF` を使う。Gateway自身のアドレスとノード範囲はサーバーの台帳で個体ごとに安定して予約され、複数Gatewayの範囲は重複しない。同じProvisioning UUIDを2台が検出した場合は先に取得したGatewayだけがProvisioningし、もう一方はサーバーの競合応答で処理を中止する。
 
 ## 追加実装
 
@@ -101,6 +101,7 @@ BOOTを押したままリセットするとESP32-C3のROM書き込みモード�
 - Gateway は `BM_GATEWAY_TOKEN` を hello / `X-Gateway-Token` ヘッダで送信
 - サーバ側 `Gateway:Token` と一致しない接続は拒否
 - `balloon` / `gateway` は BLE Mesh 設定を NVS に保存し、再起動後も Provisioning 状態と group subscription を復元
+- `gateway` / `gateway-dev` は `POST /api/gateway/{id}/mesh-address` でGatewayアドレスを取得し、検出したノードごとに `POST /api/gateway/{id}/mesh-node-address` でサーバー払い出しのユニキャストアドレスを使ってProvisioningする
 
 ## BLE Mesh Node のビルド構成
 

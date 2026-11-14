@@ -59,6 +59,30 @@ public sealed record GatewayMeshIdentityRecord(
     string DeviceUuid,
     ushort MeshAddress);
 
+public sealed record GatewayMeshNodeIdentityRecord(
+    string GatewayId,
+    string DeviceUuid,
+    ushort MeshAddress,
+    ushort RangeStart,
+    ushort RangeEnd);
+
+public sealed record GatewayMeshAddressRangeRecord(
+    string GatewayId,
+    ushort RangeStart,
+    ushort RangeEnd,
+    ushort NextAddress);
+
+public sealed record GatewayMeshAllocationRangeRecord(
+    ushort RangeStart,
+    ushort RangeEnd,
+    ushort NextAddress,
+    int AllocatedNodes);
+
+public sealed record GatewayMeshAllocationRecord(
+    string GatewayId,
+    ushort MeshAddress,
+    IReadOnlyList<GatewayMeshAllocationRangeRecord> Ranges);
+
 /// <summary>
 /// PostgreSQL persistence.  The live state is small (about 50 balloons), so
 /// commands are straightforward SQL over Npgsql connections.  The optional
@@ -66,6 +90,13 @@ public sealed record GatewayMeshIdentityRecord(
 /// </summary>
 public sealed class DataStore
 {
+    private const int GatewayAddressMin = 0x0001;
+    private const int GatewayAddressMax = 0x00FF;
+    private const int MeshNodeAddressMin = 0x0100;
+    private const int MeshNodeAddressMax = 0x3FFF;
+    private const int InitialNodeRangeSize = 64;
+    private const int NodeRangeExtensionSize = 16;
+
     private const string DefaultConnectionString =
         "Host=127.0.0.1;Port=5432;Database=balloonmesh;Username=balloonmesh;Password=balloonmesh;Pooling=true;Maximum Pool Size=20";
 
@@ -183,6 +214,20 @@ public sealed class DataStore
                 device_uuid TEXT NOT NULL UNIQUE,
                 mesh_address INTEGER NOT NULL UNIQUE,
                 updated_at TIMESTAMPTZ NOT NULL);
+            CREATE TABLE IF NOT EXISTS gateway_mesh_address_ranges(
+                id BIGSERIAL PRIMARY KEY,
+                gateway_id TEXT NOT NULL,
+                range_start INTEGER NOT NULL UNIQUE,
+                range_end INTEGER NOT NULL,
+                next_address INTEGER NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL,
+                UNIQUE(gateway_id, range_start));
+            CREATE TABLE IF NOT EXISTS gateway_mesh_node_addresses(
+                device_uuid TEXT PRIMARY KEY,
+                gateway_id TEXT NOT NULL,
+                mesh_address INTEGER NOT NULL UNIQUE,
+                range_start INTEGER NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL);
             """;
         command.ExecuteNonQuery();
         Seed(connection);
@@ -211,7 +256,8 @@ public sealed class DataStore
             using var connection = Open();
             using var command = connection.CreateCommand();
             command.CommandText = """
-                TRUNCATE TABLE positions, show_steps, gateway_mesh_addresses,
+                TRUNCATE TABLE positions, show_steps, gateway_mesh_node_addresses,
+                    gateway_mesh_address_ranges, gateway_mesh_addresses,
                     balloons, anchors, balloon_groups
                 RESTART IDENTITY CASCADE;
                 """;
@@ -290,7 +336,7 @@ public sealed class DataStore
                 return existingIdentity;
             }
 
-            var address = 0x4000;
+            var address = GatewayAddressMin;
             using (var used = connection.CreateCommand())
             {
                 used.Transaction = transaction;
@@ -314,9 +360,9 @@ public sealed class DataStore
                 }
             }
 
-            if (address > 0x7FFF)
+            if (address > GatewayAddressMax)
             {
-                throw new InvalidOperationException("No development gateway Mesh address is available.");
+                throw new InvalidOperationException("No gateway Mesh address is available.");
             }
 
             using (var insert = connection.CreateCommand())
@@ -336,6 +382,318 @@ public sealed class DataStore
             transaction.Commit();
             return new GatewayMeshIdentityRecord(gatewayId, deviceUuid, (ushort)address);
         }
+    }
+
+    /// <summary>
+    /// Allocates one stable node address for a device discovered by a gateway
+    /// Provisioner.  A gateway receives a 64-address chunk initially; after
+    /// that chunk is consumed, the server adds 16-address chunks.  The chunks
+    /// are global reservations, so two Provisioners cannot overlap even when
+    /// they discover the same device at the same time.
+    /// </summary>
+    public GatewayMeshNodeIdentityRecord GetOrAllocateGatewayMeshNodeAddress(
+        string gatewayId, string deviceUuid)
+    {
+        if (string.IsNullOrWhiteSpace(gatewayId) || gatewayId.Length > 64)
+        {
+            throw new ArgumentException("Gateway ID is required.", nameof(gatewayId));
+        }
+        if (string.IsNullOrWhiteSpace(deviceUuid) || deviceUuid.Length > 64)
+        {
+            throw new ArgumentException("Device UUID is required.", nameof(deviceUuid));
+        }
+
+        gatewayId = gatewayId.Trim();
+        deviceUuid = deviceUuid.Trim().ToUpperInvariant();
+
+        lock (_writeGate)
+        {
+            using var connection = Open();
+            using var transaction = connection.BeginTransaction();
+
+            using (var tableLock = connection.CreateCommand())
+            {
+                tableLock.Transaction = transaction;
+                tableLock.CommandText = "LOCK TABLE gateway_mesh_address_ranges, gateway_mesh_node_addresses IN EXCLUSIVE MODE";
+                tableLock.ExecuteNonQuery();
+            }
+
+            using (var existing = connection.CreateCommand())
+            {
+                existing.Transaction = transaction;
+                existing.CommandText = """
+                    SELECT gateway_id, mesh_address, range_start
+                    FROM gateway_mesh_node_addresses
+                    WHERE device_uuid = @device_uuid;
+                    """;
+                existing.Parameters.AddWithValue("device_uuid", deviceUuid);
+                using var reader = existing.ExecuteReader();
+                if (reader.Read())
+                {
+                    var ownerGatewayId = reader.GetString(0);
+                    var meshAddress = (ushort)reader.GetInt32(1);
+                    var rangeStart = (ushort)reader.GetInt32(2);
+                    reader.Close();
+                    if (!string.Equals(ownerGatewayId, gatewayId, StringComparison.Ordinal))
+                    {
+                        var ownerRange = ReadRange(connection, transaction, rangeStart);
+                        transaction.Commit();
+                        return new GatewayMeshNodeIdentityRecord(
+                            ownerGatewayId, deviceUuid, meshAddress,
+                            (ushort)ownerRange.Start, (ushort)ownerRange.End);
+                    }
+
+                    var range = ReadRange(connection, transaction, rangeStart);
+                    transaction.Commit();
+                    return new GatewayMeshNodeIdentityRecord(
+                        ownerGatewayId, deviceUuid, meshAddress,
+                        (ushort)range.Start, (ushort)range.End);
+                }
+            }
+
+            var availableRange = FindAvailableRange(connection, transaction, gatewayId);
+            var address = availableRange.NextAddress;
+            using (var update = connection.CreateCommand())
+            {
+                update.Transaction = transaction;
+                update.CommandText = """
+                    UPDATE gateway_mesh_address_ranges
+                    SET next_address = @next_address, updated_at = @updated_at
+                    WHERE id = @id;
+                    """;
+                update.Parameters.AddWithValue("next_address", address + 1);
+                update.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
+                update.Parameters.AddWithValue("id", availableRange.Id);
+                update.ExecuteNonQuery();
+            }
+
+            using (var insert = connection.CreateCommand())
+            {
+                insert.Transaction = transaction;
+                insert.CommandText = """
+                    INSERT INTO gateway_mesh_node_addresses(
+                        device_uuid, gateway_id, mesh_address, range_start, updated_at)
+                    VALUES(@device_uuid, @gateway_id, @mesh_address, @range_start, @updated_at);
+                    """;
+                insert.Parameters.AddWithValue("device_uuid", deviceUuid);
+                insert.Parameters.AddWithValue("gateway_id", gatewayId);
+                insert.Parameters.AddWithValue("mesh_address", address);
+                insert.Parameters.AddWithValue("range_start", availableRange.Start);
+                insert.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
+                insert.ExecuteNonQuery();
+            }
+
+            transaction.Commit();
+            return new GatewayMeshNodeIdentityRecord(
+                gatewayId, deviceUuid, (ushort)address,
+                (ushort)availableRange.Start, (ushort)availableRange.End);
+        }
+    }
+
+    /// <summary>Returns the gateway's current server-reserved node range.</summary>
+    public GatewayMeshAddressRangeRecord GetOrAllocateGatewayMeshAddressRange(
+        string gatewayId, string deviceUuid)
+    {
+        if (string.IsNullOrWhiteSpace(gatewayId) || gatewayId.Length > 64)
+        {
+            throw new ArgumentException("Gateway ID is required.", nameof(gatewayId));
+        }
+        if (string.IsNullOrWhiteSpace(deviceUuid) || deviceUuid.Length > 64)
+        {
+            throw new ArgumentException("Device UUID is required.", nameof(deviceUuid));
+        }
+
+        gatewayId = gatewayId.Trim();
+        deviceUuid = deviceUuid.Trim().ToUpperInvariant();
+        lock (_writeGate)
+        {
+            using var connection = Open();
+            using var transaction = connection.BeginTransaction();
+            using (var tableLock = connection.CreateCommand())
+            {
+                tableLock.Transaction = transaction;
+                tableLock.CommandText = "LOCK TABLE gateway_mesh_address_ranges IN EXCLUSIVE MODE";
+                tableLock.ExecuteNonQuery();
+            }
+
+            MeshAddressRange? range = null;
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = """
+                    SELECT id, range_start, range_end, next_address
+                    FROM gateway_mesh_address_ranges
+                    WHERE gateway_id = @gateway_id
+                    ORDER BY range_start
+                    LIMIT 1;
+                    """;
+                command.Parameters.AddWithValue("gateway_id", gatewayId);
+                using var reader = command.ExecuteReader();
+                if (reader.Read())
+                {
+                    range = new MeshAddressRange(
+                        reader.GetInt64(0), reader.GetInt32(1),
+                        reader.GetInt32(2), reader.GetInt32(3));
+                }
+            }
+            range ??= FindAvailableRange(connection, transaction, gatewayId);
+            transaction.Commit();
+            return new GatewayMeshAddressRangeRecord(
+                gatewayId, (ushort)range.Start, (ushort)range.End, (ushort)range.NextAddress);
+        }
+    }
+
+    public IReadOnlyList<GatewayMeshAllocationRecord> GetGatewayMeshAllocations()
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT a.gateway_id, a.mesh_address,
+                   r.range_start, r.range_end, r.next_address,
+                   COUNT(n.device_uuid)::INTEGER
+            FROM gateway_mesh_addresses a
+            LEFT JOIN gateway_mesh_address_ranges r
+              ON r.gateway_id = a.gateway_id
+            LEFT JOIN gateway_mesh_node_addresses n
+              ON n.gateway_id = r.gateway_id AND n.range_start = r.range_start
+            GROUP BY a.gateway_id, a.mesh_address,
+                     r.range_start, r.range_end, r.next_address
+            ORDER BY a.gateway_id, r.range_start;
+            """;
+
+        var allocations = new Dictionary<string, (ushort MeshAddress,
+            List<GatewayMeshAllocationRangeRecord> Ranges)>(StringComparer.Ordinal);
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            var gatewayId = reader.GetString(0);
+            var meshAddress = (ushort)reader.GetInt32(1);
+            if (!allocations.TryGetValue(gatewayId, out var allocation))
+            {
+                allocation = (meshAddress, []);
+                allocations[gatewayId] = allocation;
+            }
+
+            if (!reader.IsDBNull(2))
+            {
+                allocation.Ranges.Add(new GatewayMeshAllocationRangeRecord(
+                    (ushort)reader.GetInt32(2),
+                    (ushort)reader.GetInt32(3),
+                    (ushort)reader.GetInt32(4),
+                    reader.GetInt32(5)));
+            }
+        }
+
+        return allocations
+            .Select(pair => new GatewayMeshAllocationRecord(
+                pair.Key, pair.Value.MeshAddress, pair.Value.Ranges))
+            .ToArray();
+    }
+
+    private sealed record MeshAddressRange(long Id, int Start, int End, int NextAddress);
+
+    private static MeshAddressRange ReadRange(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int rangeStart)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT id, range_start, range_end, next_address
+            FROM gateway_mesh_address_ranges
+            WHERE range_start = @range_start;
+            """;
+        command.Parameters.AddWithValue("range_start", rangeStart);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            throw new InvalidOperationException("Mesh address range is missing.");
+        }
+        return new MeshAddressRange(
+            reader.GetInt64(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetInt32(3));
+    }
+
+    private static MeshAddressRange FindAvailableRange(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, string gatewayId)
+    {
+        MeshAddressRange? current = null;
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT id, range_start, range_end, next_address
+                FROM gateway_mesh_address_ranges
+                WHERE gateway_id = @gateway_id AND next_address <= range_end
+                ORDER BY range_start DESC
+                LIMIT 1;
+                """;
+            command.Parameters.AddWithValue("gateway_id", gatewayId);
+            using var reader = command.ExecuteReader();
+            if (reader.Read())
+            {
+                current = new MeshAddressRange(
+                    reader.GetInt64(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetInt32(3));
+            }
+        }
+        if (current is not null)
+        {
+            return current;
+        }
+
+        var hasExistingRange = false;
+        using (var count = connection.CreateCommand())
+        {
+            count.Transaction = transaction;
+            count.CommandText = "SELECT EXISTS(SELECT 1 FROM gateway_mesh_address_ranges WHERE gateway_id = @gateway_id)";
+            count.Parameters.AddWithValue("gateway_id", gatewayId);
+            hasExistingRange = (bool)count.ExecuteScalar()!;
+        }
+
+        var size = hasExistingRange ? NodeRangeExtensionSize : InitialNodeRangeSize;
+        var start = MeshNodeAddressMin;
+        using (var used = connection.CreateCommand())
+        {
+            used.Transaction = transaction;
+            used.CommandText = """
+                SELECT range_start, range_end
+                FROM gateway_mesh_address_ranges
+                ORDER BY range_start;
+                """;
+            using var reader = used.ExecuteReader();
+            while (reader.Read())
+            {
+                var usedStart = reader.GetInt32(0);
+                var usedEnd = reader.GetInt32(1);
+                if (start + size - 1 < usedStart)
+                {
+                    break;
+                }
+                if (start <= usedEnd)
+                {
+                    start = usedEnd + 1;
+                }
+            }
+        }
+
+        if (start + size - 1 > MeshNodeAddressMax)
+        {
+            throw new InvalidOperationException("No Mesh node address range is available.");
+        }
+
+        using var insert = connection.CreateCommand();
+        insert.Transaction = transaction;
+        insert.CommandText = """
+            INSERT INTO gateway_mesh_address_ranges(
+                gateway_id, range_start, range_end, next_address, updated_at)
+            VALUES(@gateway_id, @range_start, @range_end, @next_address, @updated_at)
+            RETURNING id;
+            """;
+        insert.Parameters.AddWithValue("gateway_id", gatewayId);
+        insert.Parameters.AddWithValue("range_start", start);
+        insert.Parameters.AddWithValue("range_end", start + size - 1);
+        insert.Parameters.AddWithValue("next_address", start);
+        insert.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
+        var id = (long)insert.ExecuteScalar()!;
+        return new MeshAddressRange(id, start, start + size - 1, start);
     }
 
     private static void Seed(NpgsqlConnection connection)

@@ -39,6 +39,17 @@
     provisioned: boolean;
     spoolPending: number;
   };
+  type GatewayMeshRange = {
+    rangeStart: number;
+    rangeEnd: number;
+    nextAddress: number;
+    allocatedNodes: number;
+  };
+  type GatewayMeshAllocation = {
+    gatewayId: string;
+    meshAddress: number;
+    ranges: GatewayMeshRange[];
+  };
   type Group = { id: number; name: string; meshGroupAddress: number; balloonCount: number };
   type HistorySample = { lat: number; lon: number; confidence: number; method: string };
   type MockDevice = {
@@ -66,6 +77,7 @@
   let balloons = $state<Balloon[]>([]);
   let anchors = $state<Anchor[]>([]);
   let gateways = $state<Gateway[]>([]);
+  let meshAllocations = $state<GatewayMeshAllocation[]>([]);
   let groups = $state<Group[]>([]);
   let simulationRunning = $state(false);
   let selectedAddress = $state<number | null>(null);
@@ -451,12 +463,21 @@
     }
   }
 
+  async function fetchGatewayMeshAllocations() {
+    try {
+      meshAllocations = await api('/api/gateway-mesh-allocations') as GatewayMeshAllocation[];
+    } catch {
+      // Allocation state is supplementary to the live gateway state.
+    }
+  }
+
   async function fetchState() {
     try {
       const state = await api('/api/state');
       applyState(state);
       void fetchShow();
       void fetchOnboarding();
+      void fetchGatewayMeshAllocations();
     } catch (error) {
       addLog(`State refresh failed: ${(error as Error).message}`);
     }
@@ -489,6 +510,18 @@
     return date.toLocaleString([], {
       month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit'
     });
+  }
+
+  function formatMeshAddress(value: number): string {
+    return `0x${value.toString(16).toUpperCase().padStart(4, '0')}`;
+  }
+
+  function meshAllocationFor(gatewayId: string): GatewayMeshAllocation | null {
+    return meshAllocations.find((allocation) => allocation.gatewayId === gatewayId) ?? null;
+  }
+
+  function rangeCapacity(range: GatewayMeshRange): number {
+    return range.rangeEnd - range.rangeStart + 1;
   }
 
   function hexToRgb(hex: string): { r: number; g: number; b: number } {
@@ -885,18 +918,41 @@
     </section>
 
     <section class="panel anchors-panel">
-      <div class="panel-title"><h2>Gateways</h2></div>
+      <div class="panel-title">
+        <h2>Gateways</h2>
+        <span class="pill">server allocation</span>
+      </div>
+      <p class="hint gateway-hint">Each Provisioner owns a unique gateway address. Balloon addresses start with 64 slots and grow by 16.</p>
       {#if gateways.length === 0}
         <p class="hint">No gateway connected. Demo mode still aggregates simulated reports.</p>
       {:else}
         <ul class="gateway-list">
           {#each gateways as gateway}
+            {@const allocation = meshAllocationFor(gateway.id)}
             <li>
-              <span class:good={gateway.webSocket} class:bad={!gateway.webSocket} class="dot"></span>
-              <strong>{gateway.id}</strong>
-              <span class="show-status" class:queued={gateway.provisioned}
-                    class:canceled={!gateway.provisioned}>{gateway.provisioned ? 'prov' : 'unprov'}</span>
-              <small>{gateway.webSocket ? 'WS' : 'HTTP'} · {gateway.pendingCommands} cmd · {gateway.spoolPending} spool</small>
+              <div class="gateway-row">
+                <span class:good={gateway.webSocket} class:bad={!gateway.webSocket} class="dot"></span>
+                <strong>{gateway.id}</strong>
+                <span class="show-status" class:queued={gateway.provisioned}
+                      class:canceled={!gateway.provisioned}>{gateway.provisioned ? 'prov' : 'unprov'}</span>
+                <small>{gateway.webSocket ? 'WS' : 'HTTP'} · {gateway.pendingCommands} cmd · {gateway.spoolPending} spool</small>
+              </div>
+              {#if allocation}
+                <div class="gateway-mesh-summary">
+                  <span>Gateway {formatMeshAddress(allocation.meshAddress)}</span>
+                  <span>{allocation.ranges.length} range{allocation.ranges.length === 1 ? '' : 's'}</span>
+                </div>
+                <ul class="gateway-range-list">
+                  {#each allocation.ranges as range}
+                    <li>
+                      <span>{formatMeshAddress(range.rangeStart)}–{formatMeshAddress(range.rangeEnd)}</span>
+                      <small>{range.allocatedNodes}/{rangeCapacity(range)} nodes</small>
+                    </li>
+                  {/each}
+                </ul>
+              {:else}
+                <div class="gateway-mesh-empty">Waiting for server allocation</div>
+              {/if}
             </li>
           {/each}
         </ul>
@@ -1166,9 +1222,16 @@
     width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent;
     border-bottom: 10px solid #a78bfa;
   }
-  .gateway-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-  .gateway-list li { display: flex; align-items: center; gap: 8px; font-size: 11px; }
-  .gateway-list small { margin-left: auto; color: #64748b; font-size: 10px; }
+  .gateway-hint { line-height: 1.45; }
+  .gateway-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+  .gateway-list li { padding: 8px; border-radius: 10px; background: rgba(15, 23, 42, 0.45); }
+  .gateway-row { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 11px; }
+  .gateway-row small { margin-left: auto; color: #64748b; font-size: 10px; white-space: nowrap; }
+  .gateway-mesh-summary { display: flex; justify-content: space-between; gap: 8px; margin: 7px 0 4px 16px; color: #7dd3fc; font-size: 10px; }
+  .gateway-range-list { list-style: none; margin: 0 0 0 16px; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+  .gateway-range-list li { display: flex; justify-content: space-between; gap: 8px; padding: 0; background: transparent; color: #cbd5e1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+  .gateway-range-list small { color: #94a3b8; font-family: "Inter", "Segoe UI", system-ui, sans-serif; font-size: 9px; }
+  .gateway-mesh-empty { margin: 7px 0 0 16px; color: #64748b; font-size: 10px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: #64748b; }
   .dot.good { background: #34d399; }
   .dot.bad { background: #f87171; }

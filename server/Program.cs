@@ -221,6 +221,10 @@ app.MapGet("/api/groups", (FleetService fleet) => Results.Ok(fleet.GetGroups()))
 app.MapGet("/api/gateways", (GatewayRegistry gateways) => Results.Ok(gateways.Snapshot()))
     .RequireAuthorization(AuthRoles.Viewer);
 
+app.MapGet("/api/gateway-mesh-allocations", (DataStore store) =>
+    Results.Ok(store.GetGatewayMeshAllocations()))
+    .RequireAuthorization(AuthRoles.Viewer);
+
 app.MapPost("/api/gateway/{id}/mesh-address",
     (HttpContext http, string id, GatewayMeshAddressRequest request,
         DataStore store, IConfiguration configuration) =>
@@ -232,10 +236,51 @@ app.MapPost("/api/gateway/{id}/mesh-address",
         try
         {
             var identity = store.GetOrAllocateGatewayMeshIdentity(id, request.DeviceUuid);
+            var range = store.GetOrAllocateGatewayMeshAddressRange(id, request.DeviceUuid);
             return Results.Ok(new
             {
                 gatewayId = identity.GatewayId,
-                meshAddress = identity.MeshAddress
+                meshAddress = identity.MeshAddress,
+                rangeStart = range.RangeStart,
+                rangeEnd = range.RangeEnd,
+                nextAddress = range.NextAddress
+            });
+        }
+        catch (ArgumentException exception)
+        {
+            return Results.BadRequest(new { error = exception.Message });
+        }
+        catch (InvalidOperationException exception)
+        {
+            return Results.Conflict(new { error = exception.Message });
+        }
+    });
+
+app.MapPost("/api/gateway/{id}/mesh-node-address",
+    (HttpContext http, string id, GatewayMeshNodeAddressRequest request,
+        DataStore store, IConfiguration configuration) =>
+    {
+        if (!GatewayAuth.IsAuthorized(http, configuration))
+        {
+            return Results.Unauthorized();
+        }
+        try
+        {
+            var identity = store.GetOrAllocateGatewayMeshNodeAddress(id, request.DeviceUuid);
+            if (!string.Equals(identity.GatewayId, id, StringComparison.Ordinal))
+            {
+                return Results.Conflict(new
+                {
+                    error = "This device is already claimed by another gateway Provisioner.",
+                    ownerGatewayId = identity.GatewayId
+                });
+            }
+            return Results.Ok(new
+            {
+                gatewayId = identity.GatewayId,
+                meshAddress = identity.MeshAddress,
+                rangeStart = identity.RangeStart,
+                rangeEnd = identity.RangeEnd
             });
         }
         catch (ArgumentException exception)

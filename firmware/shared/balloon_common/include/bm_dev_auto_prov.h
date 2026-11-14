@@ -1,7 +1,5 @@
 #pragma once
 
-#if defined(BM_DEV_AUTO_PROV) && BM_DEV_AUTO_PROV
-
 #include <stdint.h>
 #include <string.h>
 #include "esp_log.h"
@@ -31,6 +29,12 @@ static const uint8_t BM_DEV_DEV_KEY[16] = {
     0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10
 };
 
+#ifdef __cplusplus
+}
+#endif
+
+#if defined(BM_DEV_AUTO_PROV) && BM_DEV_AUTO_PROV
+
 /**
  * Automatically enters the Bluetooth Mesh network using ESP-IDF test API.
  * Ensures the node is provisioned, AppKey is bound to all models, and
@@ -58,9 +62,5 @@ static inline int bm_dev_auto_provision(uint16_t unicast_addr, uint16_t group_ad
              unicast_addr, group_addr, err);
     return err;
 }
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* BM_DEV_AUTO_PROV */

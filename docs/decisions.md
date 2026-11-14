@@ -175,10 +175,10 @@ Arduino を維持する場合の推奨確認手順:
 
 - `LED_EFFECT_NOW` / `LED_FLOW_NOW`
 - Mesh Relay の選択的 ON/OFF、LPN/Friend 構成
-- BLE Mesh Provisioner 実装 / 鍵配布 / model bind / group subscribe の自動化
+- Provisioner 用 NetKey/AppKey の安全な本番保管・ローテーション（現状の自動Provisioning経路はプロトタイプ固定鍵）
 - Protocol C の ACK・再送・TLS 証明書検証
 - 複数 Gateway 同時送信時の帯域・衝突評価
 - 50 台実機での 100ms 同期精度・電力試験
 - 初回 Wi-Fi 資格情報設定（SmartConfig / BLE Wi-Fi provisioning）
-- 実機 BLE Mesh Provisioner（MOCK UI のみ実装）
+- 実機Provisioningの電波環境・再試行・二台Gateway同時検出時の実機評価（サーバー側のUUID競合防止と64→16アドレス払い出しは実装済み）
 - 音楽タイムライン編集
