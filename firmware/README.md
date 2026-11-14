@@ -88,7 +88,8 @@ balloon は XIAO ESP32C3 の **D0/D1/D2 (GPIO2/3/4)** を **LEDC 5kHz / 8bit** �
 - 接続先は環境変数 `BM_SERVER_URL` でビルド時に指定する（空なら起動を拒否）。
 - **本番 `gateway` 環境**（`BM_PRODUCTION_BUILD=1`）
   - `https://` 以外の接続先では起動しない。
-  - サーバー証明書を発行したCAを `firmware/shared/balloon_common/include/bm_server_ca.h`（git管理外）に `#define BM_TLS_CA_CERT "-----BEGIN CERTIFICATE-----\n..."` として置く。無ければビルドエラーになる。
+  - CAは既定でLet's Encryptのルート（ISRG Root X1/X2、`bm_letsencrypt_roots.h`）を使う。
+  - Let's Encrypt以外のCAを使う場合だけ、`firmware/shared/balloon_common/include/bm_server_ca.h`（git管理外）に `#define BM_TLS_CA_CERT "-----BEGIN CERTIFICATE-----\n..."` を置いて上書きする。
   - HTTPS/WSS ともCAチェーンとホスト名を検証する。
 - **Mesh鍵**
   - 本番のNetKey/AppKeyはサーバーがデプロイごとに乱数生成し、DBの `mesh_network_keys` に保存する。Gatewayは `mesh-address` の応答で受け取る。

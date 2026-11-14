@@ -104,4 +104,4 @@ API キーは `gateway_api_keys` にハッシュのみ保存されます。
 Mesh の NetKey/AppKey はサーバーが初回に乱数で生成し、`mesh_network_keys` テーブルに保存します。
 - 失うと既存の Mesh を操作できなくなるので、DB のバックアップ対象に必ず含めてください。
 - ファームウェアには本番鍵は含まれません。
-- Gateway のビルドには `https://` の `BM_SERVER_URL` と、サーバー証明書の CA（`bm_server_ca.h`）が必要です。
+- Gateway のビルドには `https://` の `BM_SERVER_URL` が必要です。CA は Let's Encrypt のルートを内蔵しているので、Let's Encrypt の証明書なら追加設定は不要です。
