@@ -1,7 +1,9 @@
 using BalloonMesh.Server.Data;
 using BalloonMesh.Server.Hubs;
 using BalloonMesh.Server.Models;
+using BalloonMesh.Server.Services;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
 using Xunit;
@@ -80,6 +82,137 @@ public sealed class RecordingMonitorEvents : IMonitorEvents
     public Task SimulationChangedAsync(bool running) => Task.CompletedTask;
     public Task CommandSentAsync(CommandResultDto result) => Task.CompletedTask;
     public Task OnboardingUpdatedAsync(IReadOnlyList<MockProvisioningDevice> devices) => Task.CompletedTask;
+}
+
+public static class TestRegistry
+{
+    /// <summary>
+    /// A registry backed by in-memory persistence, so tests of the queueing
+    /// and readiness rules do not need a database.
+    /// </summary>
+    public static GatewayRegistry Create(IMonitorEvents events,
+        IGatewayStateStore? store = null) =>
+        new(events, store ?? new FakeGatewayStateStore(),
+            NullLogger<GatewayRegistry>.Instance);
+}
+
+/// <summary>In-memory stand-in for the gateways table.</summary>
+public sealed class FakeGatewayStateStore : IGatewayStateStore
+{
+    private readonly Dictionary<string, GatewayRecord> _rows = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _gate = new();
+    private int _writes;
+
+    public int Writes
+    {
+        get { lock (_gate) { return _writes; } }
+    }
+
+    public IReadOnlyList<GatewayRecord> GetGateways()
+    {
+        lock (_gate)
+        {
+            return _rows.Values.ToArray();
+        }
+    }
+
+    public void UpsertGateway(string id, string? remote, string? firmware,
+        bool? provisioned, int? spoolPending, DateTimeOffset lastSeen)
+    {
+        lock (_gate)
+        {
+            _writes++;
+            _rows.TryGetValue(id, out var existing);
+            _rows[id] = new GatewayRecord(
+                id,
+                remote ?? existing?.Remote,
+                firmware ?? existing?.Firmware,
+                provisioned ?? existing?.Provisioned ?? false,
+                spoolPending ?? existing?.SpoolPending ?? 0,
+                existing?.FirstSeen ?? lastSeen,
+                existing is null || lastSeen > existing.LastSeen
+                    ? lastSeen
+                    : existing.LastSeen);
+        }
+    }
+
+    public void Seed(GatewayRecord record)
+    {
+        lock (_gate)
+        {
+            _rows[record.Id] = record;
+        }
+    }
+}
+
+/// <summary>In-memory stand-in for the gateway_tokens table.</summary>
+public sealed class FakeGatewayTokenRepository : IGatewayTokenRepository
+{
+    private readonly Dictionary<long, GatewayTokenRecord> _rows = [];
+    private readonly Dictionary<string, long> _byHash = new(StringComparer.Ordinal);
+    private long _nextId = 1;
+
+    public int Lookups { get; private set; }
+    public int UseWrites { get; private set; }
+
+    /// <summary>
+    /// Runs once, inside the next lookup and after its row is read, so a test
+    /// can interleave a revoke with a lookup that is already in flight.
+    /// </summary>
+    public Action? OnNextLookup { get; set; }
+
+    public long InsertGatewayToken(string gatewayId, string label, byte[] tokenHash,
+        string prefix, string createdBy, DateTimeOffset createdAt,
+        DateTimeOffset? expiresAt)
+    {
+        var id = _nextId++;
+        _rows[id] = new GatewayTokenRecord(id, gatewayId, label, prefix, createdAt,
+            createdBy, null, expiresAt, null);
+        _byHash[Convert.ToHexString(tokenHash)] = id;
+        return id;
+    }
+
+    public IReadOnlyList<GatewayTokenRecord> GetGatewayTokens() =>
+        _rows.Values.OrderByDescending(row => row.Id).ToArray();
+
+    public GatewayTokenRecord? FindGatewayTokenByHash(byte[] tokenHash)
+    {
+        Lookups++;
+        var row = _byHash.TryGetValue(Convert.ToHexString(tokenHash), out var id)
+            ? _rows[id]
+            : null;
+        var hook = OnNextLookup;
+        if (hook is not null)
+        {
+            OnNextLookup = null;
+            hook();
+        }
+        return row;
+    }
+
+    public bool RevokeGatewayToken(long id, DateTimeOffset revokedAt)
+    {
+        if (!_rows.TryGetValue(id, out var row) || row.RevokedAt is not null)
+        {
+            return false;
+        }
+        _rows[id] = row with { RevokedAt = revokedAt };
+        return true;
+    }
+
+    public void TouchGatewayTokenUse(long id, DateTimeOffset usedAt)
+    {
+        UseWrites++;
+        if (_rows.TryGetValue(id, out var row))
+        {
+            _rows[id] = row with { LastUsedAt = usedAt };
+        }
+    }
+
+    public void Expire(long id, DateTimeOffset expiresAt)
+    {
+        _rows[id] = _rows[id] with { ExpiresAt = expiresAt };
+    }
 }
 
 public sealed class TestTimeProvider : TimeProvider

@@ -221,8 +221,27 @@ Cookie 認証を基盤に、ローカルユーザー（ASP.NET Core Identity）�
 
 - 保護された API は未ログインで `401`、権限不足で `403`（`/api/health`、`/favicon.ico`、認証エンドポイントは公開）
 - 未ログインのページは `/login` へリダイレクト
-- Gateway の `/api/gateway/*` と `/ws/gateway` はユーザー認証ではなく `Gateway:Token` で認証
+- Gateway の `/api/gateway/*` と `/ws/gateway` はユーザー認証ではなく Gateway ごとに発行したトークンで認証（`X-Gateway-Token` ヘッダ / WebSocket hello の `token`）。トークンは Admin が UI から発行し、未発行なら全接続を拒否
 - SignalR `/hubs/monitor` は Viewer 以上を要求
+
+### Gateway トークンの発行
+
+Gateway は共有シークレットではなく、Gateway 単位に発行したトークンで認証します。
+
+1. Admin でログインし、サイドバーの **Gateway tokens** パネルで Gateway ID（firmware の
+   `BM_GATEWAY_ID` と同じ値）、ラベル、任意で有効期限（日数）を入力して **Issue**。
+2. 表示されたトークンをコピーします。**この値が表示されるのは一度だけ**で、サーバは
+   SHA-256 ハッシュしか保存しないため再表示できません。
+3. firmware のビルド時に環境変数で渡します。
+
+   ```bash
+   BM_GATEWAY_TOKEN=bmgw_xxxxxxxx pio run -e gateway -t upload
+   ```
+
+- トークンは発行対象の Gateway ID でしか使えません（別 ID を名乗る接続は拒否）
+- 失効は同じパネルの **Revoke**。行は監査用に残り、以後その値は拒否されます
+- 漏洩時は失効 → 再発行 → 再書き込みの順で入れ替えます
+- API としては `GET` / `POST /api/gateway-tokens`、`DELETE /api/gateway-tokens/{id}`（いずれも Admin 限定）
 
 ### OIDC
 
@@ -412,7 +431,7 @@ pio run -t upload
 - BLE Mesh 設定の NVS 永続化（アドレス・鍵・model bind・group subscription・SEQ/RPL）
 - 基準局が使えない場合の Mesh 時刻フォールバック（TIME_REQUEST/TIME_REPORT。バルーン間で交換し、サーバは透過転送のみ）
 - Gateway の NVS オフラインスプール（128 件、再接続後に再送）
-- Gateway 共有トークン認証（`Gateway:Token` / `X-Gateway-Token`）
+- Gateway ごとのトークン発行・失効（Admin UI、`gateway_tokens` テーブル。サーバはハッシュのみ保持）
 - UI の Gateway 状態（prov/unprov、spool 件数、transport）
 
 ### SvelteSharp Client モード
@@ -479,8 +498,10 @@ FTM_REPORT の 4B timestamp は、確定仕様で未決定のため **LED tick40
 - `anchors` — 基準局座標・時刻有効性
 - `positions` — 測位履歴（UI には測定時刻を表示しない）
 - `show_steps` — 予約コマンドの履歴
+- `gateways` — Gateway の最終状態（firmware、prov、spool 件数、last seen）。再起動後も一覧が残る
+- `gateway_tokens` — 発行済み Gateway トークン（SHA-256 ハッシュ、発行者、最終使用、有効期限、失効時刻）
 
-接続文字列は `ConnectionStrings:BalloonMesh`、テスト用スキーマは `Data:Schema` で指定します。Gateway:Token を設定すると Gateway の WebSocket hello / HTTP ヘッダ（`X-Gateway-Token`）が一致しない接続を拒否します。
+接続文字列は `ConnectionStrings:BalloonMesh`、テスト用スキーマは `Data:Schema` で指定します。
 
 ---
 
@@ -496,4 +517,4 @@ FTM_REPORT の 4B timestamp は、確定仕様で未決定のため **LED tick40
 5. **LED_CANCEL の tombstone** は 64 件のリングバッファです。大量のキャンセルを長時間保持する要件がある場合は拡張が必要です。
 6. **デモシミュレーション** はサーバ内で FTM 報告を合成します。実機 Gateway がない状態でも UI と集約ロジックを確認できますが、電波・Mesh の実特性は再現しません。
 7. **UI の CDN 依存**  MapLibre GL JS と SignalR ブラウザクライアントは CDN から遅延ロードします。閉域網ではこれらのファイルを `wwwroot` 等に配置し、`Home.svelte` の URL を差し替えてください。
-8. **認証**  Gateway の共有トークン認証（`Gateway:Token`）は実装済みです。Protocol A は 8B 共有トークンのみ、WSS は CA 未設定時に証明書ピン留めなしです。本番では TLS 証明書検証 / トークンローテーション / 署名付きコマンドを追加してください。
+8. **認証**  Gateway は Admin UI で発行した Gateway 単位のトークンで認証します（失効・有効期限あり、サーバはハッシュのみ保持、トークンは発行対象の `gatewayId` 以外では使えません）。トークンが 1 件も発行されていなければ全接続を拒否します。firmware 側はビルド時マクロ `BM_GATEWAY_TOKEN`（環境変数 `BM_GATEWAY_TOKEN` から注入）なので、ローテーションには再書き込みが必要です。Protocol A は 8B 共有トークンのみ、WSS は CA 未設定時に証明書ピン留めなしです。本番では TLS 証明書検証 / 署名付きコマンドを追加してください。

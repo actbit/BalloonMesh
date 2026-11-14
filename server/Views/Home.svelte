@@ -51,6 +51,18 @@
     progress: number;
     error: string | null;
   };
+  type GatewayToken = {
+    id: number;
+    gatewayId: string;
+    label: string;
+    prefix: string;
+    createdAt: string;
+    createdBy: string;
+    lastUsedAt: string | null;
+    expiresAt: string | null;
+    revokedAt: string | null;
+    active: boolean;
+  };
   type ShowStep = {
     id: number;
     name: string;
@@ -84,6 +96,14 @@
   let showSteps = $state<ShowStep[]>([]);
   let onboarding = $state<MockDevice[]>([]);
   let busy = $state(false);
+  let gatewayTokens = $state<GatewayToken[]>([]);
+  let tokenGatewayId = $state('');
+  let tokenLabel = $state('');
+  let tokenExpiresInDays = $state('');
+  // The plain token the server returned.  It is shown once and never fetched
+  // again, so it is kept only until the operator dismisses it.
+  let issuedToken = $state<{ value: string; gatewayId: string } | null>(null);
+  let tokenCopied = $state(false);
 
   let map: any = null;
   let maplibregl: any = null;
@@ -447,6 +467,89 @@
     }
   }
 
+  async function fetchGatewayTokens() {
+    if (!model.canAdmin) return;
+    try {
+      gatewayTokens = await api('/api/gateway-tokens') as GatewayToken[];
+    } catch (error) {
+      addLog(`Gateway tokens: ${(error as Error).message}`);
+    }
+  }
+
+  async function issueGatewayToken() {
+    if (!model.canAdmin) return;
+    const gatewayId = tokenGatewayId.trim();
+    if (!gatewayId) {
+      addLog('Gateway token: gateway ID is required');
+      return;
+    }
+    // A typo must not silently become a never-expiring token: Number('30d')
+    // is NaN, which JSON.stringify would send as null.
+    const text = tokenExpiresInDays.trim();
+    let days: number | null = null;
+    if (text) {
+      const parsed = Number(text);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 3650) {
+        addLog('Gateway token: expiry must be a whole number of days (1-3650)');
+        return;
+      }
+      days = parsed;
+    }
+    busy = true;
+    try {
+      const result = await api('/api/gateway-tokens', {
+        method: 'POST',
+        body: JSON.stringify({
+          gatewayId,
+          label: tokenLabel.trim() || null,
+          expiresInDays: days
+        })
+      });
+      issuedToken = { value: result.token, gatewayId };
+      tokenCopied = false;
+      tokenGatewayId = '';
+      tokenLabel = '';
+      tokenExpiresInDays = '';
+      await fetchGatewayTokens();
+      addLog(`Issued gateway token for ${gatewayId}`);
+    } catch (error) {
+      addLog(`Gateway token: ${(error as Error).message}`);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function copyIssuedToken() {
+    if (!issuedToken) return;
+    try {
+      await navigator.clipboard.writeText(issuedToken.value);
+      tokenCopied = true;
+    } catch {
+      // Clipboard access can be blocked; the value stays selectable on screen.
+      addLog('Could not copy — select the token manually');
+    }
+  }
+
+  async function revokeGatewayToken(id: number, label: string) {
+    if (!model.canAdmin) return;
+    if (!confirm(`Revoke "${label}"? The gateway using it stops being accepted.`)) {
+      return;
+    }
+    try {
+      await api(`/api/gateway-tokens/${id}`, { method: 'DELETE' });
+      await fetchGatewayTokens();
+      addLog(`Revoked gateway token ${label}`);
+    } catch (error) {
+      addLog(`Revoke failed: ${(error as Error).message}`);
+    }
+  }
+
+  function tokenStatus(token: GatewayToken): string {
+    if (token.revokedAt) return 'revoked';
+    if (!token.active) return 'expired';
+    return token.lastUsedAt ? 'in use' : 'unused';
+  }
+
   async function fetchShow() {
     try {
       showSteps = await api('/api/show?limit=12') as ShowStep[];
@@ -461,6 +564,7 @@
       applyState(state);
       void fetchShow();
       void fetchOnboarding();
+      void fetchGatewayTokens();
     } catch (error) {
       addLog(`State refresh failed: ${(error as Error).message}`);
     }
@@ -831,6 +935,79 @@
           {/each}
         </ul>
       </section>
+
+      <section class="panel token-panel">
+        <div class="panel-title">
+          <h2>Gateway tokens</h2>
+          <span class="pill">{gatewayTokens.filter((token) => token.active).length} active</span>
+        </div>
+        <p class="hint">
+          Gateway ごとにトークンを発行します。発行した値はこの画面に一度だけ表示され、
+          サーバはハッシュしか保持しません。
+        </p>
+
+        {#if issuedToken}
+          <div class="token-reveal">
+            <strong>{issuedToken.gatewayId} のトークン</strong>
+            <code>{issuedToken.value}</code>
+            <small>この値は二度と表示されません。firmware に設定してから閉じてください。</small>
+            <div class="token-reveal-actions">
+              <button class="mini" onclick={copyIssuedToken}>
+                {tokenCopied ? 'Copied' : 'Copy'}
+              </button>
+              <button class="mini" onclick={() => { issuedToken = null; }}>Close</button>
+            </div>
+          </div>
+        {/if}
+
+        <div class="token-form">
+          <label>
+            <span>Gateway ID</span>
+            <input bind:value={tokenGatewayId} placeholder="gw-01" />
+          </label>
+          <label>
+            <span>Label</span>
+            <input bind:value={tokenLabel} placeholder="ステージ上手" />
+          </label>
+          <label>
+            <span>Expires (days)</span>
+            <input bind:value={tokenExpiresInDays} inputmode="numeric" placeholder="無期限" />
+          </label>
+          <button class="primary" onclick={issueGatewayToken} disabled={busy}>Issue</button>
+        </div>
+
+        {#if gatewayTokens.length === 0}
+          <p class="hint">
+            トークンが未発行のため、すべての Gateway 接続は拒否されます。
+          </p>
+        {:else}
+          <ul class="token-list">
+            {#each gatewayTokens as token}
+              <li class:inactive={!token.active}>
+                <span class="token-main">
+                  <strong>{token.gatewayId}</strong>
+                  <small>{token.label} · {token.prefix}…</small>
+                  <small>
+                    {token.lastUsedAt
+                      ? `last used ${new Date(token.lastUsedAt).toLocaleString()}`
+                      : `issued ${new Date(token.createdAt).toLocaleString()} by ${token.createdBy}`}
+                    {token.expiresAt
+                      ? ` · expires ${new Date(token.expiresAt).toLocaleDateString()}`
+                      : ''}
+                  </small>
+                </span>
+                <span class="show-status"
+                      class:queued={token.active}
+                      class:canceled={!token.active}>{tokenStatus(token)}</span>
+                {#if token.active}
+                  <button class="mini"
+                          onclick={() => revokeGatewayToken(token.id, token.label)}>Revoke</button>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
     {/if}
 
     <section class="panel schedule-panel">
@@ -1161,6 +1338,38 @@
   .progress { flex: 1; height: 4px; border-radius: 999px; background: rgba(148, 163, 184, 0.18); overflow: hidden; }
   .progress span { display: block; height: 100%; background: linear-gradient(90deg, #38bdf8, #a78bfa); transition: width 0.3s ease; }
   .error-row { padding-left: 28px; font-size: 9px; color: #fca5a5; }
+
+  .token-form { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+  .token-form label { display: flex; flex-direction: column; gap: 4px; }
+  .token-form span { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: #64748b; }
+  .token-form input {
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    background: rgba(15, 23, 42, 0.8);
+    color: #e2e8f0;
+    border-radius: 9px;
+    padding: 7px 10px;
+    font-size: 12px;
+  }
+  .token-reveal {
+    display: flex; flex-direction: column; gap: 6px; margin-top: 10px;
+    padding: 10px; border-radius: 10px;
+    border: 1px solid rgba(251, 191, 36, 0.45);
+    background: rgba(251, 191, 36, 0.1);
+  }
+  .token-reveal strong { font-size: 11px; color: #fde68a; }
+  .token-reveal code {
+    font-size: 11px; word-break: break-all; user-select: all;
+    padding: 7px 8px; border-radius: 8px;
+    background: rgba(15, 23, 42, 0.85); color: #e2e8f0;
+  }
+  .token-reveal small { font-size: 9px; color: #fcd34d; }
+  .token-reveal-actions { display: flex; gap: 6px; }
+  .token-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .token-list li { display: flex; align-items: center; gap: 8px; }
+  .token-list li.inactive { opacity: 0.55; }
+  .token-main { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .token-main strong { font-size: 11px; }
+  .token-main small { font-size: 9px; color: #94a3b8; }
   button:disabled { opacity: 0.42; cursor: not-allowed; }
   button:disabled:hover { border-color: rgba(148, 163, 184, 0.25); background: rgba(15, 23, 42, 0.75); }
   .anchor-status-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }

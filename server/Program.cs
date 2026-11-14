@@ -38,10 +38,15 @@ builder.Services.AddIdentityCore<ApplicationUser>(options =>
     .AddSignInManager();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<DataStore>();
+builder.Services.AddSingleton<IGatewayStateStore>(serviceProvider =>
+    serviceProvider.GetRequiredService<DataStore>());
+builder.Services.AddSingleton<IGatewayTokenRepository>(serviceProvider =>
+    serviceProvider.GetRequiredService<DataStore>());
 builder.Services.AddSingleton<FleetService>();
 builder.Services.AddSingleton<PositionSolver>();
 builder.Services.AddSingleton<NeighborStore>();
 builder.Services.AddSingleton<GatewayRegistry>();
+builder.Services.AddSingleton<GatewayTokenStore>();
 builder.Services.AddSingleton<MonitorNotifier>();
 builder.Services.AddSingleton<IMonitorEvents>(serviceProvider => serviceProvider.GetRequiredService<MonitorNotifier>());
 builder.Services.AddSingleton<FtmAggregator>();
@@ -77,12 +82,10 @@ var dataStore = app.Services.GetRequiredService<DataStore>();
 dataStore.Initialize();
 dataStore.ResetRuntimeQueueState();
 
-if (string.IsNullOrWhiteSpace(GatewayAuth.ConfiguredToken(app.Configuration)) &&
-    !app.Environment.IsDevelopment())
-{
-    app.Logger.LogWarning(
-        "Gateway:Token is not configured; /ws/gateway and /api/gateway/* accept unauthenticated clients.");
-}
+// Gateways authenticate with a per-gateway token issued from the admin UI.
+// There is no shared secret and no anonymous path: with no token issued, the
+// gateway endpoints reject every caller.
+app.Services.GetRequiredService<GatewayRegistry>().LoadFromStore();
 
 app.UseWebSockets(new WebSocketOptions
 {
@@ -110,7 +113,7 @@ app.Map("/ws/gateway", async context =>
     var logger = context.RequestServices.GetRequiredService<ILoggerFactory>()
         .CreateLogger("GatewayWebSocket");
     await GatewayWebSocket.HandleAsync(socket, context, registry, router, logger,
-        GatewayAuth.ConfiguredToken(context.RequestServices.GetRequiredService<IConfiguration>()),
+        context.RequestServices.GetRequiredService<GatewayTokenStore>(),
         context.RequestAborted);
 });
 
@@ -351,11 +354,63 @@ app.MapPost("/api/demo/stop", async (SimulationService simulation, CancellationT
     return Results.Ok(new { running = false });
 }).RequireAuthorization(AuthRoles.Admin);
 
+app.MapGet("/api/gateway-tokens", (GatewayTokenStore tokens) =>
+    Results.Ok(tokens.List().Select(GatewayTokenDto.From)))
+    .RequireAuthorization(AuthRoles.Admin);
+
+app.MapPost("/api/gateway-tokens",
+    (HttpContext http, GatewayTokenRequest request, GatewayTokenStore tokens,
+        TimeProvider time) =>
+    {
+        var gatewayId = request.GatewayId?.Trim();
+        if (string.IsNullOrWhiteSpace(gatewayId))
+        {
+            return Results.BadRequest(new { error = "gatewayId is required." });
+        }
+        if (!GatewayTokenStore.IsValidGatewayId(gatewayId))
+        {
+            return Results.BadRequest(new
+            {
+                error = "gatewayId may use letters, digits, '-', '_' and '.' only, " +
+                    $"up to {GatewayTokenStore.MaxGatewayIdLength} characters."
+            });
+        }
+        var label = string.IsNullOrWhiteSpace(request.Label)
+            ? gatewayId
+            : request.Label.Trim();
+        if (label.Length > 128)
+        {
+            return Results.BadRequest(new { error = "label is too long." });
+        }
+        DateTimeOffset? expiresAt = null;
+        if (request.ExpiresInDays is { } days)
+        {
+            if (days is < 1 or > 3650)
+            {
+                return Results.BadRequest(
+                    new { error = "expiresInDays must be between 1 and 3650." });
+            }
+            expiresAt = time.GetUtcNow().AddDays(days);
+        }
+        var issuer = AuthenticatedUser.From(http.User).Name;
+        var issued = tokens.Issue(gatewayId, label, issuer, expiresAt);
+        // The plain token is in this response only; it is not stored.
+        return Results.Created($"/api/gateway-tokens/{issued.Record.Id}",
+            new IssuedGatewayTokenDto(GatewayTokenDto.From(issued.Record),
+                issued.PlainToken));
+    }).RequireAuthorization(AuthRoles.Admin);
+
+app.MapDelete("/api/gateway-tokens/{id:long}", (long id, GatewayTokenStore tokens) =>
+    tokens.Revoke(id)
+        ? Results.Ok(new { revoked = true })
+        : Results.NotFound(new { error = "Token not found or already revoked." }))
+    .RequireAuthorization(AuthRoles.Admin);
+
 app.MapPost("/api/gateway/{id}/events",
     (HttpContext http, string id, GatewayEventsRequest request, GatewayRegistry registry,
-        MeshReportRouter router, IConfiguration configuration) =>
+        MeshReportRouter router, GatewayTokenStore tokens) =>
     {
-        if (!GatewayAuth.IsAuthorized(http, configuration))
+        if (!tokens.AuthenticateRequest(http, id).Authorized)
         {
             return Results.Unauthorized();
         }
@@ -375,9 +430,9 @@ app.MapPost("/api/gateway/{id}/events",
 
 app.MapGet("/api/gateway/{id}/commands",
     async (HttpContext http, string id, int? waitMs, GatewayRegistry registry,
-        IConfiguration configuration, CancellationToken cancellationToken) =>
+        GatewayTokenStore tokens, CancellationToken cancellationToken) =>
     {
-        if (!GatewayAuth.IsAuthorized(http, configuration))
+        if (!tokens.AuthenticateRequest(http, id).Authorized)
         {
             return Results.Unauthorized();
         }

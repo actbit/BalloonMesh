@@ -40,7 +40,7 @@ public sealed class DebugApiClient : IDisposable
 
     public Uri BaseUri => _baseUri;
 
-    /// <summary>Optional shared gateway token. Never persisted by the tool.</summary>
+    /// <summary>Gateway token issued by the server. Never persisted by the tool.</summary>
     public string? GatewayToken { get; set; }
 
     /// <summary>

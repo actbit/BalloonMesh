@@ -1,3 +1,4 @@
+using BalloonMesh.Server.Data;
 using SvelteSharp.Models;
 
 namespace BalloonMesh.Server.Models;
@@ -131,6 +132,43 @@ public sealed record AnchorUpdateRequest(
     bool PositionValid = true);
 
 public sealed record AssignGroupRequest(int GroupId);
+
+public sealed record GatewayTokenRequest(
+    string? GatewayId,
+    string? Label,
+    int? ExpiresInDays);
+
+public sealed record GatewayTokenDto(
+    long Id,
+    string GatewayId,
+    string Label,
+    string Prefix,
+    DateTimeOffset CreatedAt,
+    string CreatedBy,
+    DateTimeOffset? LastUsedAt,
+    DateTimeOffset? ExpiresAt,
+    DateTimeOffset? RevokedAt,
+    bool Active)
+{
+    public static GatewayTokenDto From(GatewayTokenRecord record) => new(
+        record.Id,
+        record.GatewayId,
+        record.Label,
+        record.Prefix,
+        record.CreatedAt,
+        record.CreatedBy,
+        record.LastUsedAt,
+        record.ExpiresAt,
+        record.RevokedAt,
+        record.RevokedAt is null &&
+            (record.ExpiresAt is null || record.ExpiresAt > DateTimeOffset.UtcNow));
+}
+
+/// <summary>
+/// Issue response.  <paramref name="Token"/> is the only time the plain value
+/// is available; the server keeps just its digest.
+/// </summary>
+public sealed record IssuedGatewayTokenDto(GatewayTokenDto Record, string Token);
 
 public sealed record GatewayEventDto(
     ushort Src,

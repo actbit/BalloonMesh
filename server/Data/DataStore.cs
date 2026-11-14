@@ -1,4 +1,5 @@
 using Npgsql;
+using NpgsqlTypes;
 
 namespace BalloonMesh.Server.Data;
 
@@ -43,6 +44,35 @@ public sealed record PositionSampleRecord(
     DateTimeOffset MeasuredAt,
     DateTimeOffset CreatedAt);
 
+/// <summary>
+/// A gateway as last reported to the server.  The live transport state
+/// (sockets, queued commands) stays in <c>GatewayRegistry</c>; everything that
+/// must survive a restart lives here.
+/// </summary>
+public sealed record GatewayRecord(
+    string Id,
+    string? Remote,
+    string? Firmware,
+    bool Provisioned,
+    int SpoolPending,
+    DateTimeOffset FirstSeen,
+    DateTimeOffset LastSeen);
+
+/// <summary>
+/// An issued gateway token.  Only the SHA-256 digest is stored, so the plain
+/// value exists exactly once: in the response to the issuing request.
+/// </summary>
+public sealed record GatewayTokenRecord(
+    long Id,
+    string GatewayId,
+    string Label,
+    string Prefix,
+    DateTimeOffset CreatedAt,
+    string CreatedBy,
+    DateTimeOffset? LastUsedAt,
+    DateTimeOffset? ExpiresAt,
+    DateTimeOffset? RevokedAt);
+
 public sealed record ShowStepRecord(
     long Id,
     string Name,
@@ -55,11 +85,39 @@ public sealed record ShowStepRecord(
     string Status);
 
 /// <summary>
+/// The durable part of the gateway registry.  Kept as an interface so the
+/// registry's queueing logic can be tested without a database.
+/// </summary>
+public interface IGatewayStateStore
+{
+    IReadOnlyList<GatewayRecord> GetGateways();
+
+    void UpsertGateway(string id, string? remote, string? firmware,
+        bool? provisioned, int? spoolPending, DateTimeOffset lastSeen);
+}
+
+/// <summary>Storage for issued gateway tokens.</summary>
+public interface IGatewayTokenRepository
+{
+    long InsertGatewayToken(string gatewayId, string label, byte[] tokenHash,
+        string prefix, string createdBy, DateTimeOffset createdAt,
+        DateTimeOffset? expiresAt);
+
+    IReadOnlyList<GatewayTokenRecord> GetGatewayTokens();
+
+    GatewayTokenRecord? FindGatewayTokenByHash(byte[] tokenHash);
+
+    bool RevokeGatewayToken(long id, DateTimeOffset revokedAt);
+
+    void TouchGatewayTokenUse(long id, DateTimeOffset usedAt);
+}
+
+/// <summary>
 /// PostgreSQL persistence.  The live state is small (about 50 balloons), so
 /// commands are straightforward SQL over Npgsql connections.  The optional
 /// schema setting lets tests use an isolated namespace in the same database.
 /// </summary>
-public sealed class DataStore
+public sealed class DataStore : IGatewayStateStore, IGatewayTokenRepository
 {
     private const string DefaultConnectionString =
         "Host=127.0.0.1;Port=5432;Database=balloonmesh;Username=balloonmesh;Password=balloonmesh;Pooling=true;Maximum Pool Size=20";
@@ -173,6 +231,29 @@ public sealed class DataStore
                 g SMALLINT NOT NULL,
                 b SMALLINT NOT NULL,
                 status TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS gateways(
+                id TEXT PRIMARY KEY,
+                remote TEXT NULL,
+                firmware TEXT NULL,
+                provisioned BOOLEAN NOT NULL DEFAULT FALSE,
+                spool_pending INTEGER NOT NULL DEFAULT 0,
+                first_seen TIMESTAMPTZ NOT NULL,
+                last_seen TIMESTAMPTZ NOT NULL);
+            CREATE TABLE IF NOT EXISTS gateway_tokens(
+                id BIGSERIAL PRIMARY KEY,
+                gateway_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                token_hash BYTEA NOT NULL,
+                prefix TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                created_by TEXT NOT NULL,
+                last_used_at TIMESTAMPTZ NULL,
+                expires_at TIMESTAMPTZ NULL,
+                revoked_at TIMESTAMPTZ NULL);
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_gateway_tokens_hash
+                ON gateway_tokens(token_hash);
+            CREATE INDEX IF NOT EXISTS ix_gateway_tokens_gateway
+                ON gateway_tokens(gateway_id);
             """;
         command.ExecuteNonQuery();
         Seed(connection);
@@ -201,7 +282,8 @@ public sealed class DataStore
             using var connection = Open();
             using var command = connection.CreateCommand();
             command.CommandText = """
-                TRUNCATE TABLE positions, show_steps, balloons, anchors, balloon_groups
+                TRUNCATE TABLE positions, show_steps, balloons, anchors, balloon_groups,
+                    gateways, gateway_tokens
                 RESTART IDENTITY CASCADE;
                 """;
             command.ExecuteNonQuery();
@@ -784,4 +866,191 @@ public sealed class DataStore
         }
         return result;
     }
+
+    public IReadOnlyList<GatewayRecord> GetGateways()
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, remote, firmware, provisioned, spool_pending, first_seen, last_seen
+            FROM gateways ORDER BY id;
+            """;
+        using var reader = command.ExecuteReader();
+        var result = new List<GatewayRecord>();
+        while (reader.Read())
+        {
+            result.Add(new GatewayRecord(
+                reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.GetBoolean(3),
+                reader.GetInt32(4),
+                reader.GetFieldValue<DateTimeOffset>(5),
+                reader.GetFieldValue<DateTimeOffset>(6)));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Writes the last-known state of a gateway.  Null fields keep the stored
+    /// value, so a transport that does not report firmware or spool depth does
+    /// not erase what another one already recorded.
+    /// </summary>
+    public void UpsertGateway(string id, string? remote, string? firmware,
+        bool? provisioned, int? spoolPending, DateTimeOffset lastSeen)
+    {
+        lock (_writeGate)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                INSERT INTO gateways(id, remote, firmware, provisioned, spool_pending,
+                    first_seen, last_seen)
+                VALUES(@id, @remote, @firmware, COALESCE(@provisioned, FALSE),
+                    COALESCE(@spool, 0), @seen, @seen)
+                ON CONFLICT (id) DO UPDATE SET
+                    remote = COALESCE(@remote, gateways.remote),
+                    firmware = COALESCE(@firmware, gateways.firmware),
+                    provisioned = COALESCE(@provisioned, gateways.provisioned),
+                    spool_pending = COALESCE(@spool, gateways.spool_pending),
+                    last_seen = GREATEST(gateways.last_seen, @seen);
+                """;
+            command.Parameters.AddWithValue("id", id);
+            // Nullable parameters carry an explicit type: PostgreSQL cannot
+            // infer one for an untyped NULL inside COALESCE.
+            Add(command, "remote", NpgsqlDbType.Text, remote);
+            Add(command, "firmware", NpgsqlDbType.Text, firmware);
+            Add(command, "provisioned", NpgsqlDbType.Boolean, provisioned);
+            Add(command, "spool", NpgsqlDbType.Integer, spoolPending);
+            command.Parameters.AddWithValue("seen", lastSeen);
+            command.ExecuteNonQuery();
+        }
+    }
+
+    public long InsertGatewayToken(string gatewayId, string label, byte[] tokenHash,
+        string prefix, string createdBy, DateTimeOffset createdAt,
+        DateTimeOffset? expiresAt)
+    {
+        lock (_writeGate)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                INSERT INTO gateway_tokens(gateway_id, label, token_hash, prefix,
+                    created_at, created_by, expires_at)
+                VALUES(@gateway, @label, @hash, @prefix, @created, @by, @expires)
+                RETURNING id;
+                """;
+            command.Parameters.AddWithValue("gateway", gatewayId);
+            command.Parameters.AddWithValue("label", label);
+            command.Parameters.AddWithValue("hash", tokenHash);
+            command.Parameters.AddWithValue("prefix", prefix);
+            command.Parameters.AddWithValue("created", createdAt);
+            command.Parameters.AddWithValue("by", createdBy);
+            Add(command, "expires", NpgsqlDbType.TimestampTz, expiresAt);
+            return Convert.ToInt64(command.ExecuteScalar());
+        }
+    }
+
+    public IReadOnlyList<GatewayTokenRecord> GetGatewayTokens()
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, gateway_id, label, prefix, created_at, created_by,
+                   last_used_at, expires_at, revoked_at
+            FROM gateway_tokens ORDER BY id DESC;
+            """;
+        using var reader = command.ExecuteReader();
+        var result = new List<GatewayTokenRecord>();
+        while (reader.Read())
+        {
+            result.Add(ReadGatewayToken(reader));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Looks a token up by digest.  Revoked and expired rows are returned too;
+    /// the caller decides, so that a rejected attempt can still be logged
+    /// against the token it was issued as.
+    /// </summary>
+    public GatewayTokenRecord? FindGatewayTokenByHash(byte[] tokenHash)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, gateway_id, label, prefix, created_at, created_by,
+                   last_used_at, expires_at, revoked_at
+            FROM gateway_tokens WHERE token_hash = @hash;
+            """;
+        command.Parameters.AddWithValue("hash", tokenHash);
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? ReadGatewayToken(reader) : null;
+    }
+
+    /// <summary>Marks a token revoked.  The row is kept as an audit trail.</summary>
+    public bool RevokeGatewayToken(long id, DateTimeOffset revokedAt)
+    {
+        lock (_writeGate)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                UPDATE gateway_tokens SET revoked_at = @at
+                WHERE id = @id AND revoked_at IS NULL;
+                """;
+            command.Parameters.AddWithValue("at", revokedAt);
+            command.Parameters.AddWithValue("id", id);
+            return command.ExecuteNonQuery() > 0;
+        }
+    }
+
+    public void TouchGatewayTokenUse(long id, DateTimeOffset usedAt)
+    {
+        lock (_writeGate)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                UPDATE gateway_tokens SET last_used_at = @at
+                WHERE id = @id AND (last_used_at IS NULL OR last_used_at < @at);
+                """;
+            command.Parameters.AddWithValue("at", usedAt);
+            command.Parameters.AddWithValue("id", id);
+            command.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>Adds a parameter whose NULL needs a declared type.</summary>
+    private static void Add<T>(NpgsqlCommand command, string name,
+        NpgsqlDbType type, T? value) where T : struct
+    {
+        var parameter = new NpgsqlParameter(name, type)
+        {
+            Value = value.HasValue ? value.Value : DBNull.Value
+        };
+        command.Parameters.Add(parameter);
+    }
+
+    private static void Add(NpgsqlCommand command, string name,
+        NpgsqlDbType type, string? value)
+    {
+        var parameter = new NpgsqlParameter(name, type)
+        {
+            Value = (object?)value ?? DBNull.Value
+        };
+        command.Parameters.Add(parameter);
+    }
+
+    private static GatewayTokenRecord ReadGatewayToken(NpgsqlDataReader reader) => new(
+        reader.GetInt64(0),
+        reader.GetString(1),
+        reader.GetString(2),
+        reader.GetString(3),
+        reader.GetFieldValue<DateTimeOffset>(4),
+        reader.GetString(5),
+        reader.IsDBNull(6) ? null : reader.GetFieldValue<DateTimeOffset>(6),
+        reader.IsDBNull(7) ? null : reader.GetFieldValue<DateTimeOffset>(7),
+        reader.IsDBNull(8) ? null : reader.GetFieldValue<DateTimeOffset>(8));
 }
