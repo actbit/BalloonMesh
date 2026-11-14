@@ -94,6 +94,15 @@ void bm_time_link_on_request(void) {
     s_reply_armed = true;
 }
 
+void bm_time_link_on_send_failed(uint32_t opcode) {
+    if (opcode == BM_VENDOR_OPCODE(BM_OP_TIME_REPORT)) {
+        /* Nothing went out, so the rate limit must not hold back the next
+         * reply to a request. */
+        s_has_replied = false;
+        s_last_reply_ms = 0;
+    }
+}
+
 void bm_time_link_on_report(const uint8_t *data, uint16_t length) {
     int64_t utc_ms = 0;
     if (!bm_decode_time_report(data, length, &utc_ms)) {

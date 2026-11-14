@@ -531,6 +531,17 @@ static void health_server_cb(esp_ble_mesh_health_server_cb_event_t event,
 
 static void custom_model_cb(esp_ble_mesh_model_cb_event_t event,
                             esp_ble_mesh_model_cb_param_t *param) {
+    if (event == ESP_BLE_MESH_MODEL_SEND_COMP_EVT) {
+        /* esp_ble_mesh_client_model_send_msg() only queues the message, so the
+         * real outcome of an uplink arrives here. */
+        if (param->model_send_comp.err_code != ESP_OK) {
+            ESP_LOGW(TAG, "uplink 0x%06lx not sent: %s",
+                     (unsigned long)param->model_send_comp.opcode,
+                     esp_err_to_name(param->model_send_comp.err_code));
+            bm_time_link_on_send_failed((uint32_t)param->model_send_comp.opcode);
+        }
+        return;
+    }
     if (event != ESP_BLE_MESH_MODEL_OPERATION_EVT) {
         return;
     }
